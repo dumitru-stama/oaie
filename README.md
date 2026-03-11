@@ -394,7 +394,6 @@ programmatic access to all functionality.
 ## Build
 
 ```bash
-cd code_v03
 make                     # build + clippy + test (668 tests)
 make build-firecracker   # build with Firecracker backend
 make build-mcp           # build MCP server
