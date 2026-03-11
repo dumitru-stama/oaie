@@ -1,0 +1,58 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oaie-bpf-common",
+    "crates/oaie-cli",
+    "crates/oaie-core",
+    "crates/oaie-cas",
+    "crates/oaie-db",
+    "crates/oaie-sandbox",
+    "crates/oaie-observe",
+    "crates/oaie-report",
+    "crates/oaie-cgroup",
+    "crates/oaie-priv",
+    "crates/oaie-netpol",
+    "crates/oaie-tests",
+    "crates/oaie-firecracker",
+    "crates/oaie-guest",
+    "crates/oaie-agent",
+    "crates/oaie-mcp",
+]
+
+[workspace.package]
+version = "0.1.7"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/dumitru-stama/Oaie"
+homepage = "https://github.com/dumitru-stama/Oaie"
+authors = ["Dumitru Stama"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
+blake3 = "1"
+sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+postgres = "0.19"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7"] }
+nix = { version = "0.29", features = ["process", "sched", "mount", "signal", "user", "hostname", "fs", "ptrace", "socket"] }
+libc = "0.2"
+clap_complete = "4"
+tempfile = "3"
+tar = "0.4"
+flate2 = "1"
+libbpf-rs = "0.24"
+libbpf-sys = "1"
+oaie-bpf-common = { path = "crates/oaie-bpf-common" }
+oaie-firecracker = { path = "crates/oaie-firecracker" }
+tokio = { version = "1", features = ["net", "io-util", "rt", "time", "process", "macros"] }
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1"] }
+http-body-util = "0.1"
+http = "1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+rand = "0.8"
+zeroize = "1"

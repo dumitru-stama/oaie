@@ -1,0 +1,14 @@
+[package]
+name = "oaie-cgroup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cgroup v2 per-run isolation for OAIE sandboxes"
+authors = ["Dumitru Stama"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+libc = { workspace = true }
+nix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

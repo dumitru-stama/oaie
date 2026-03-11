@@ -1,0 +1,21 @@
+[package]
+name = "oaie-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP (Model Context Protocol) server for OAIE"
+authors = ["Dumitru Stama"]
+
+[lib]
+name = "oaie_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oaie-mcp"
+path = "src/main.rs"
+
+[dependencies]
+oaie-agent = { path = "../oaie-agent" }
+oaie-core = { path = "../oaie-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }

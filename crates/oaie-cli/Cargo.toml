@@ -1,0 +1,45 @@
+[package]
+name = "oaie-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for Observed & Attested Isolated Execution"
+authors = ["Dumitru Stama"]
+
+[[bin]]
+name = "oaie"
+path = "src/main.rs"
+
+[lib]
+name = "oaie_cli"
+path = "src/lib.rs"
+
+[features]
+ebpf = ["oaie-observe/ebpf"]
+firecracker = ["dep:oaie-firecracker"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+oaie-cas = { path = "../oaie-cas" }
+oaie-db = { path = "../oaie-db" }
+oaie-sandbox = { path = "../oaie-sandbox" }
+oaie-cgroup = { path = "../oaie-cgroup" }
+oaie-observe = { path = "../oaie-observe" }
+oaie-report = { path = "../oaie-report" }
+oaie-netpol = { path = "../oaie-netpol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true }
+clap_complete = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
+oaie-firecracker = { workspace = true, optional = true }
+tempfile = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+blake3 = { workspace = true }
+toml = { workspace = true }
+zeroize = { workspace = true }

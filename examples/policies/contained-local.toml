@@ -1,0 +1,16 @@
+# TOML equivalent of the "contained-local" policy preset.
+#
+# Usage: oaie session run --policy=examples/policies/contained-local.toml -- ...
+#
+# This is the same as --contained=local but as an editable TOML file,
+# allowing customization of per-tool sandbox limits.
+
+[defaults]
+network = false     # Tools don't need network — agent handles LLM API calls
+
+[limits]
+max_memory = "1G"
+max_time = "10m"
+max_pids = 128
+max_fsize = "1G"
+allow_memfd = true  # For JIT runtimes (Java, Node.js, .NET)

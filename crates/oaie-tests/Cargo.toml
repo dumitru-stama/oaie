@@ -1,0 +1,41 @@
+[package]
+name = "oaie-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Consolidated tests for all OAIE crates"
+authors = ["Dumitru Stama"]
+
+# No library code — only test helpers and integration tests.
+[lib]
+name = "oaie_tests"
+path = "src/lib.rs"
+
+[features]
+ebpf = ["oaie-observe/ebpf", "oaie-cli/ebpf"]
+firecracker = ["oaie-cli/firecracker"]
+
+[dependencies]
+oaie-bpf-common = { workspace = true }
+oaie-core = { path = "../oaie-core" }
+oaie-cas = { path = "../oaie-cas" }
+oaie-db = { path = "../oaie-db" }
+oaie-report = { path = "../oaie-report" }
+oaie-sandbox = { path = "../oaie-sandbox" }
+oaie-observe = { path = "../oaie-observe" }
+oaie-cli = { path = "../oaie-cli" }
+oaie-cgroup = { path = "../oaie-cgroup" }
+oaie-priv = { path = "../oaie-priv" }
+libc = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+nix = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+oaie-firecracker = { workspace = true }
+oaie-agent = { path = "../oaie-agent" }
+oaie-netpol = { path = "../oaie-netpol" }
+oaie-mcp = { path = "../oaie-mcp" }
+tar = { workspace = true }
+flate2 = { workspace = true }

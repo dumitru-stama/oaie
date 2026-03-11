@@ -1,0 +1,332 @@
+//! The `oaie replay` subcommand — re-run a previous execution and compare outputs.
+//!
+//! Reconstructs the JobSpec from a stored manifest, re-executes with the same
+//! isolation and policy settings, then compares output artifact hashes.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use clap::Args;
+
+use oaie_cas::store::{format_duration, read_manifest};
+use oaie_core::artifact::{ArtifactRef, ArtifactType, Hash};
+use oaie_core::job::{JobSpec, TraceMode};
+use oaie_core::manifest::Manifest;
+use oaie_db::OaieDb;
+
+use oaie_core::error::{OaieError, Result};
+
+use super::load_store;
+use crate::output;
+use oaie_cli::runner::Runner;
+
+/// Replay a previous run with the same inputs and isolation settings.
+#[derive(Args, Debug)]
+pub struct ReplayCmd {
+    /// Run ID to replay (or prefix, or "last").
+    pub run_id: String,
+
+    /// Show hash details for mismatched outputs.
+    #[arg(long)]
+    pub diff: bool,
+}
+
+/// Comparison between an original and a replayed output artifact.
+struct OutputMatch {
+    /// Artifact label (e.g. "output/result.txt").
+    path: String,
+    /// Hash of the original output.
+    original_hash: Hash,
+    /// Hash of the replay output, if the file was produced.
+    replay_hash: Option<Hash>,
+    /// Whether the hashes match.
+    matches: bool,
+}
+
+impl ReplayCmd {
+    /// Re-execute a stored run and compare outputs.
+    pub fn execute(&self) -> Result<()> {
+        let store = load_store()?;
+        let db = OaieDb::open(&store.db_path)?;
+
+        // Resolve run ID.
+        let run = if self.run_id == "last" {
+            db.get_latest_run()?
+                .ok_or_else(|| OaieError::Other("no runs found".into()))?
+        } else {
+            db.get_run_by_prefix(&self.run_id)?
+        };
+
+        // Load the original manifest.
+        let run_dir = store.runs_dir.join(run.run_id.full());
+        let manifest = read_manifest(&run_dir)?;
+
+        println!();
+        output::info(&format!("replaying run {}", run.run_id.short()));
+        println!();
+
+        // Reconstruct a JobSpec from the manifest.
+        // Replay does NOT trace — we're comparing outputs, not traces.
+        // The original input directory is not stored in the manifest, so we
+        // use the current directory as default (same as normal run).
+        let job = JobSpec {
+            command: manifest.command.clone(),
+            inputs: None,
+            outputs: None,
+            network: manifest.isolation.network,
+            trace: TraceMode::Off,
+            timeout: None,
+            policy: None,
+            extra_ro: vec![],
+            extra_rw: vec![],
+            no_isolation: !manifest.isolation.level.is_isolated(),
+            backend: Default::default(),
+            interactive: false,
+        };
+
+        // Build a policy from the manifest's policy info.
+        let policy = replay_policy(&manifest);
+
+        // Warn the user about inherent replay limitations.
+        output::warn("replay does not restore the original input directory or mount points; \
+                       results may differ if the run depended on specific paths");
+
+        // Execute the replay run.
+        let runner = Runner::new(store.clone())?;
+        let replay_result = runner.execute(&job, &policy, true, None)?;
+
+        // Load the replay manifest.
+        let replay_run_dir = store.runs_dir.join(replay_result.run_id.full());
+        let replay_manifest = read_manifest(&replay_run_dir)?;
+
+        // Compare output artifacts.
+        let comparisons = compare_outputs(&manifest, &replay_manifest);
+        print_replay_result(
+            &run.run_id,
+            &replay_result.run_id,
+            &comparisons,
+            manifest.duration_ms,
+            replay_result.duration.as_millis().min(u64::MAX as u128) as u64,
+            self.diff,
+        );
+
+        Ok(())
+    }
+}
+
+/// Build a ResolvedPolicy from the manifest's policy info for replay.
+fn replay_policy(manifest: &Manifest) -> oaie_cli::policy_resolve::ResolvedPolicy {
+    use oaie_core::policy;
+
+    // Start from the safe preset, then override with what the manifest recorded.
+    let safe = policy::Policy::preset_safe();
+    let deny_paths = safe
+        .mounts
+        .deny
+        .iter()
+        .map(|p| policy::expand_tilde(p))
+        .collect();
+
+    let (network, max_memory, max_time, max_pids, max_fsize, allow_memfd) =
+        if let Some(ref pi) = manifest.policy {
+            // Reconstruct NetworkMode from manifest, preserving allowlist rules.
+            let net_mode = if manifest.isolation.network_mode == "allowlist" {
+                // Rebuild AllowRule vec from serialized rules in the manifest.
+                let rules = pi.network_rules.as_ref().map(|serialized| {
+                    serialized.iter().map(|r| {
+                        let is_cidr = r.target.contains('/');
+                        policy::AllowRule {
+                            host: if is_cidr { None } else { Some(r.target.clone()) },
+                            cidr: if is_cidr { Some(r.target.clone()) } else { None },
+                            port: r.port,
+                            protocol: r.protocol.clone(),
+                        }
+                    }).collect::<Vec<_>>()
+                }).unwrap_or_default();
+                policy::NetworkMode::Allowlist(rules)
+            } else if pi.network {
+                policy::NetworkMode::On
+            } else {
+                policy::NetworkMode::Off
+            };
+            (
+                net_mode,
+                policy::parse_size(&pi.max_memory).unwrap_or(512 * 1024 * 1024),
+                policy::parse_duration_policy(&pi.max_time)
+                    .unwrap_or(Duration::from_secs(300)),
+                pi.max_pids,
+                policy::parse_size(&pi.max_fsize).unwrap_or(1024 * 1024 * 1024),
+                pi.allow_memfd,
+            )
+        } else {
+            (
+                policy::NetworkMode::Off,
+                512 * 1024 * 1024,
+                Duration::from_secs(300),
+                64,
+                1024 * 1024 * 1024,
+                false,
+            )
+        };
+
+    oaie_cli::policy_resolve::ResolvedPolicy {
+        name: manifest.policy.as_ref().and_then(|p| p.name.clone()),
+        network,
+        timeout: Some(max_time),
+        trace: TraceMode::Off,
+        input_dir: std::path::PathBuf::from("."),
+        output_dir: None,
+        ro_mounts: vec![],
+        rw_mounts: vec![],
+        deny_paths,
+        max_memory,
+        max_time,
+        max_pids,
+        max_fsize,
+        allow_memfd,
+        retain_caps: 0,
+        auto_mounts: vec![],
+        cpu_quota: None,
+        cgroup_mode: oaie_core::cgroup::CgroupMode::Off,
+    }
+}
+
+/// Compare output artifacts between original and replay manifests.
+fn compare_outputs(original: &Manifest, replay: &Manifest) -> Vec<OutputMatch> {
+    let mut comparisons = Vec::new();
+
+    let orig_outputs: Vec<&ArtifactRef> = original
+        .artifacts
+        .iter()
+        .filter(|a| a.artifact_type == ArtifactType::Output)
+        .collect();
+    let replay_outputs: Vec<&ArtifactRef> = replay
+        .artifacts
+        .iter()
+        .filter(|a| a.artifact_type == ArtifactType::Output)
+        .collect();
+
+    // Build a map of replay outputs by label.
+    let replay_map: HashMap<&str, &ArtifactRef> = replay_outputs
+        .iter()
+        .map(|a| (a.label.as_str(), *a))
+        .collect();
+
+    // Check original outputs against replay.
+    for orig in &orig_outputs {
+        match replay_map.get(orig.label.as_str()) {
+            Some(replay_artifact) => {
+                comparisons.push(OutputMatch {
+                    path: orig.label.clone(),
+                    original_hash: orig.hash.clone(),
+                    replay_hash: Some(replay_artifact.hash.clone()),
+                    matches: orig.hash == replay_artifact.hash,
+                });
+            }
+            None => {
+                comparisons.push(OutputMatch {
+                    path: orig.label.clone(),
+                    original_hash: orig.hash.clone(),
+                    replay_hash: None,
+                    matches: false,
+                });
+            }
+        }
+    }
+
+    // Check for new files in replay that weren't in original.
+    for replay_artifact in &replay_outputs {
+        if !orig_outputs
+            .iter()
+            .any(|a| a.label == replay_artifact.label)
+        {
+            comparisons.push(OutputMatch {
+                path: format!("{} (new in replay)", replay_artifact.label),
+                original_hash: Hash::from_data(b""),
+                replay_hash: Some(replay_artifact.hash.clone()),
+                matches: false,
+            });
+        }
+    }
+
+    // Also compare stdout and stderr hashes.
+    let orig_stdout = original
+        .artifacts
+        .iter()
+        .find(|a| a.artifact_type == ArtifactType::Stdout);
+    let replay_stdout = replay
+        .artifacts
+        .iter()
+        .find(|a| a.artifact_type == ArtifactType::Stdout);
+    if let (Some(o), Some(r)) = (orig_stdout, replay_stdout) {
+        comparisons.push(OutputMatch {
+            path: "stdout".into(),
+            original_hash: o.hash.clone(),
+            replay_hash: Some(r.hash.clone()),
+            matches: o.hash == r.hash,
+        });
+    }
+
+    comparisons
+}
+
+/// Print replay comparison results.
+fn print_replay_result(
+    original_id: &oaie_core::run_id::RunId,
+    replay_id: &oaie_core::run_id::RunId,
+    comparisons: &[OutputMatch],
+    orig_ms: u64,
+    replay_ms: u64,
+    show_diff: bool,
+) {
+    let total = comparisons.len();
+    let matching = comparisons.iter().filter(|m| m.matches).count();
+    let differing = total - matching;
+
+    output::info(&format!(
+        "replay results (original {} -> replay {})",
+        original_id.short(),
+        replay_id.short()
+    ));
+    println!();
+
+    for m in comparisons {
+        if m.matches {
+            println!("  {} {} -- identical", output::pass_icon(), m.path);
+        } else if m.replay_hash.is_none() {
+            println!(
+                "  {} {} -- missing in replay (was in original)",
+                output::skip_icon(),
+                m.path
+            );
+        } else {
+            println!("  {} {} -- differs", output::fail_icon(), m.path);
+            if show_diff {
+                println!("      original: {}", m.original_hash.short());
+                if let Some(ref rh) = m.replay_hash {
+                    println!("      replay:   {}", rh.short());
+                }
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "  {} outputs compared: {} identical, {} differ",
+        total, matching, differing
+    );
+    println!(
+        "  Timing: original {}, replay {}",
+        format_duration(orig_ms),
+        format_duration(replay_ms)
+    );
+
+    if differing > 0 {
+        println!();
+        output::info("Note: output differences are common and expected.");
+        eprintln!("      Many tools produce nondeterministic output (timestamps, PIDs, ASLR).");
+        eprintln!("      See 'oaie help replay' for known nondeterminism sources.");
+    }
+    println!();
+}
+

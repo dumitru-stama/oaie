@@ -1,0 +1,3 @@
+# Build job: compile a project with longer timeout and more resources.
+command = ["make", "-j4"]
+timeout = 600.0

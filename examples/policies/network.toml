@@ -1,0 +1,12 @@
+# Network-enabled policy: allows outbound network access.
+name = "network"
+
+[defaults]
+network = true
+trace = "off"
+
+[limits]
+max_memory = "512M"
+max_time = "5m"
+max_pids = 64
+max_fsize = "1G"

@@ -1,0 +1,13 @@
+[package]
+name = "oaie-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux namespace isolation for OAIE runs"
+authors = ["Dumitru Stama"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+nix = { workspace = true }
+libc = { workspace = true }
+uuid = { workspace = true }

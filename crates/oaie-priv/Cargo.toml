@@ -1,0 +1,26 @@
+[package]
+name = "oaie-priv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Privileged helper for OAIE cgroup v2 scope management"
+authors = ["Dumitru Stama"]
+
+[lib]
+name = "oaie_priv"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oaie-priv"
+path = "src/main.rs"
+
+[features]
+ebpf = ["dep:libbpf-rs", "dep:oaie-bpf-common"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libbpf-rs = { workspace = true, optional = true }
+oaie-bpf-common = { workspace = true, optional = true }

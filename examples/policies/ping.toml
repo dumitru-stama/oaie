@@ -1,0 +1,15 @@
+# Policy for tools that need ICMP ping (CAP_NET_RAW).
+#
+# Retains CAP_NET_RAW so `ping` can create raw ICMP sockets.
+# Network must also be enabled for the ping to reach a target.
+name = "ping"
+
+[defaults]
+network = true
+
+[limits]
+max_memory = "512M"
+max_time = "1m"
+max_pids = 64
+max_fsize = "1G"
+capabilities = ["net_raw"]

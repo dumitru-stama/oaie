@@ -1,0 +1,2 @@
+# Minimal job: just echo hello.
+command = ["echo", "hello"]

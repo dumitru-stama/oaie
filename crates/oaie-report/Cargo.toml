@@ -1,0 +1,12 @@
+[package]
+name = "oaie-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Report and manifest generation for OAIE runs"
+authors = ["Dumitru Stama"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+oaie-observe = { path = "../oaie-observe" }
+chrono = { workspace = true }

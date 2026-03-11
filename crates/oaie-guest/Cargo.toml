@@ -1,0 +1,17 @@
+[package]
+name = "oaie-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Guest agent for OAIE Firecracker microVM (init process)"
+authors = ["Dumitru Stama"]
+
+[[bin]]
+name = "oaie-guest"
+path = "src/main.rs"
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }

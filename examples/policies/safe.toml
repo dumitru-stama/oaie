@@ -1,0 +1,12 @@
+# Default safe policy: deny-by-default, no network, conservative limits.
+name = "safe"
+
+[defaults]
+network = false
+trace = "off"
+
+[limits]
+max_memory = "512M"
+max_time = "5m"
+max_pids = 64
+max_fsize = "1G"

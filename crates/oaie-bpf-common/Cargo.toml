@@ -1,0 +1,10 @@
+[package]
+name = "oaie-bpf-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared #[repr(C)] types between BPF programs and Rust userspace"
+authors = ["Dumitru Stama"]
+
+[dependencies]
+# Zero dependencies — this crate is shared with BPF-side definitions.

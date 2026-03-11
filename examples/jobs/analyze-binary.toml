@@ -1,0 +1,3 @@
+# Analysis job: run a binary analysis tool with a timeout.
+command = ["file", "/in/sample.bin"]
+timeout = 60.0

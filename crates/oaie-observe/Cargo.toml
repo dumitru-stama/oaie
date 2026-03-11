@@ -1,0 +1,22 @@
+[package]
+name = "oaie-observe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Syscall observation and tracing for OAIE runs"
+authors = ["Dumitru Stama"]
+
+[features]
+ebpf = ["dep:libbpf-rs", "dep:libbpf-sys", "dep:oaie-bpf-common"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+oaie-cas = { path = "../oaie-cas" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+nix = { workspace = true }
+libc = { workspace = true }
+libbpf-rs = { workspace = true, optional = true }
+libbpf-sys = { workspace = true, optional = true }
+oaie-bpf-common = { workspace = true, optional = true }

@@ -1,0 +1,12 @@
+# Build policy: higher limits for compilation workloads.
+name = "build"
+
+[defaults]
+network = false
+trace = "off"
+
+[limits]
+max_memory = "2G"
+max_time = "10m"
+max_pids = 256
+max_fsize = "1G"

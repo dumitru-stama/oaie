@@ -1,0 +1,16 @@
+# TOML equivalent of the "contained-cloud" policy preset.
+#
+# Usage: oaie session run --policy=examples/policies/contained-cloud.toml -- ...
+#
+# This is the same as --contained=cloud but as an editable TOML file,
+# allowing customization of per-tool sandbox limits.
+
+[defaults]
+network = false     # Tools don't need network — agent handles LLM API calls
+
+[limits]
+max_memory = "512M"
+max_time = "5m"
+max_pids = 64
+max_fsize = "1G"
+allow_memfd = false

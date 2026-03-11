@@ -1,0 +1,15 @@
+[package]
+name = "oaie-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Library interface for calling OAIE from Rust agents and tools"
+authors = ["Dumitru Stama"]
+
+[dependencies]
+oaie-core = { path = "../oaie-core" }
+oaie-cli = { path = "../oaie-cli" }
+oaie-cas = { path = "../oaie-cas" }
+oaie-db = { path = "../oaie-db" }
+serde = { workspace = true }
+serde_json = { workspace = true }
