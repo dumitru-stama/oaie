@@ -134,7 +134,7 @@ fn setup_panic_handler() {
         eprintln!("  message: {message}");
         eprintln!("  version: {} ({})", env!("CARGO_PKG_VERSION"), env!("OAIE_GIT_HASH"));
         eprintln!();
-        eprintln!("Please report this at: https://github.com/oaie-run/oaie/issues");
+        eprintln!("Please report this at: https://github.com/dumitru-stama/oaie/issues");
     }));
 }
 

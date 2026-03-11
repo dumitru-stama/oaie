@@ -23,8 +23,8 @@ members = [
 version = "0.1.7"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/dumitru-stama/Oaie"
-homepage = "https://github.com/dumitru-stama/Oaie"
+repository = "https://github.com/dumitru-stama/oaie"
+homepage = "https://github.com/dumitru-stama/oaie"
 authors = ["Dumitru Stama"]
 
 [workspace.dependencies]
