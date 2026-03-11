@@ -242,7 +242,7 @@ oaie verify --session <session-id>
 | Max network bytes | Unlimited | Network transfer cap (with nftables tracking) |
 | Agent output rate | Unlimited | Per-second stdout/stderr rate limit |
 
-See [SESSIONS.md](SESSIONS.md) and [CONTAINMENT.md](CONTAINMENT.md) for the full guide.
+See [SESSIONS.md](docs/SESSIONS.md) and [CONTAINMENT.md](docs/CONTAINMENT.md) for the full guide.
 
 ---
 
@@ -379,14 +379,17 @@ programmatic access to all functionality.
 
 | Guide | Content |
 |-------|---------|
-| [SECURITY.md](SECURITY.md) | Full security model, attack surface, threat analysis |
-| [SESSIONS.md](SESSIONS.md) | Session mode lifecycle, dispatch protocol, budgets |
-| [CONTAINMENT.md](CONTAINMENT.md) | Containment profiles, agent sandboxing |
-| [NETWORK.md](NETWORK.md) | Network modes, allowlists, nftables, DNS proxy |
-| [TRACING.md](TRACING.md) | Trace modes, hash chains, verification |
-| [BACKENDS.md](BACKENDS.md) | Execution backends (namespace, Firecracker) |
-| [SECURITY_DIAGRAMS.md](../SECURITY_DIAGRAMS.md) | Visual security model diagrams |
-| [features.md](features.md) | Complete CLI flag reference |
+| [SECURITY.md](docs/SECURITY.md) | Full security model, attack surface, threat analysis |
+| [SESSIONS.md](docs/SESSIONS.md) | Session mode lifecycle, dispatch protocol, budgets |
+| [CONTAINMENT.md](docs/CONTAINMENT.md) | Containment profiles, agent sandboxing |
+| [NETWORK.md](docs/NETWORK.md) | Network modes, allowlists, nftables, DNS proxy |
+| [TRACING.md](docs/TRACING.md) | Trace modes, hash chains, verification |
+| [BACKENDS.md](docs/BACKENDS.md) | Execution backends (namespace, Firecracker) |
+| [SECURITY_DIAGRAMS.md](docs/SECURITY_DIAGRAMS.md) | Visual security model diagrams |
+| [FEATURES.md](docs/FEATURES.md) | Complete CLI flag reference |
+| [DESIGN.md](docs/DESIGN.md) | Architecture, design rationale, goals |
+| [CHANGELOG.md](docs/CHANGELOG.md) | Version history and release notes |
+| [VALIDATION_GUIDE.md](docs/VALIDATION_GUIDE.md) | Step-by-step feature testing procedures |
 
 ## Build
 
