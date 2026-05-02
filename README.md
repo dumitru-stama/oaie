@@ -77,7 +77,7 @@ oaie verify <run-id>
  | blocked)|    | network,   |    | (Ed25519) |
  |         |    | processes, |    |           |
  | cgroups |    | security   |    | Stored in |
- | + rlimits|   | events     |    | CAS with  |
+ | +rlimits|    | events     |    | CAS with  |
  |         |    |            |    | hash chain|
  | Landlock|    | Out-of-band|    |           |
  | caps=0  |    | (untamper- |    | oaie      |
@@ -125,18 +125,18 @@ break through simultaneously.
 |   ERRNO tier: mount, ptrace, reboot, keyctl, ... |
 |   Arg inspection: clone, socket, prctl, ioctl    |
 +--[Layer 4]---------------------------------------+
-| All capabilities dropped (0 of 41 retained)     |
-|   Allowlist: only CAP_NET_RAW, CAP_NET_BIND_SVC |
+| All capabilities dropped (0 of 41 retained)      |
+|   Allowlist: only CAP_NET_RAW, CAP_NET_BIND_SVC  |
 +--[Layer 3]---------------------------------------+
 | Cgroup v2: hard memory, PID, and CPU caps        |
-|   memory.max, memory.swap.max=0, pids.max,      |
+|   memory.max, memory.swap.max=0, pids.max,       |
 |   cpu.max (kernel-enforced, cannot be bypassed)  |
 +--[Layer 2]---------------------------------------+
 | rlimits: memory, CPU time, file size, processes, |
 |   open files, locked memory, stack, core dumps   |
 +--[Layer 1]---------------------------------------+
 | 6 Linux namespaces                               |
-|   user, mount, PID, IPC, UTS, net (+ cgroup)    |
+|   user, mount, PID, IPC, UTS, net (+ cgroup)     |
 +--------------------------------------------------+
 ```
 
