@@ -100,6 +100,27 @@ impl Drop for VsockHost {
     }
 }
 
+/// Reader wrapper that enforces an absolute deadline across an entire
+/// framed read. SO_RCVTIMEO alone is a per-`read()` inactivity timer, so a
+/// peer that trickles >=1 byte per window could otherwise hold `read_exact`
+/// indefinitely inside `wire::decode`.
+struct DeadlineReader<'a> {
+    inner: &'a mut UnixStream,
+    deadline: Instant,
+}
+
+impl io::Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if Instant::now() >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "frame read deadline exceeded",
+            ));
+        }
+        io::Read::read(&mut *self.inner, buf)
+    }
+}
+
 /// Framed communication channel over a vsock connection.
 ///
 /// Uses the wire protocol's length-prefixed JSON framing.
@@ -121,9 +142,16 @@ impl VsockStream {
     }
 
     /// Receive a message with a custom read timeout.
+    ///
+    /// `timeout` is enforced as an absolute deadline for the whole frame
+    /// (header + payload), not just a per-`read()` inactivity timer.
     pub fn recv_timeout(&mut self, timeout: Duration) -> io::Result<Option<Message>> {
         self.stream.set_read_timeout(Some(timeout))?;
-        let result = wire::recv(&mut self.stream);
+        let mut reader = DeadlineReader {
+            inner: &mut self.stream,
+            deadline: Instant::now() + timeout,
+        };
+        let result = wire::recv(&mut reader);
         // Restore default timeout (ignore error — worst case is wrong timeout on next call).
         let _ = self.stream.set_read_timeout(Some(Duration::from_secs(30)));
         result

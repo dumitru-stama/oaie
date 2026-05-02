@@ -21,7 +21,10 @@ pub struct NetworkEnforcement {
     pub veth: Option<VethSetup>,
     /// Resolved allowlist rules used for enforcement.
     pub resolved_rules: Vec<ResolvedAllowRule>,
-    /// PID of the sandbox child (for dynamic rule updates).
+    /// PID of the sandbox child. **Logging only** — do NOT re-resolve
+    /// `/proc/{sandbox_pid}/ns/net` from this; the PID can be reused
+    /// after waitpid() reaps the child (see `cleanup`). Anything that
+    /// needs to enter the netns holds an open fd on it.
     pub sandbox_pid: u32,
 }
 
@@ -62,8 +65,22 @@ pub fn enforce_allowlist(
     };
 
     // Step 3: Generate and apply nftables rules.
+    //
+    // Open an fd on the netns up-front so the rest of the path operates on
+    // the borrowed fd. The PID is live here (post_map_hook runs before the
+    // child unblocks), but apply_in_netns takes BorrowedFd to keep the
+    // PID-reuse-safe path uniform with the DNS proxy's later calls.
+    let netns_path = format!("/proc/{raw_pid}/ns/net");
+    let netns_fd = std::fs::File::open(&netns_path).map_err(|e| {
+        if let Some(ref v) = veth {
+            let _ = veth::cleanup_veth(v);
+        }
+        crate::error::NetpolError::NftablesApply(format!(
+            "open {netns_path} for nft setup: {e}"
+        ))
+    })?;
     let script = nftables::generate_nft_script(&resolved);
-    if let Err(e) = nftables::apply_in_netns(raw_pid, &script) {
+    if let Err(e) = nftables::apply_in_netns(std::os::fd::AsFd::as_fd(&netns_fd), &script) {
         // Cleanup veth on nftables failure to avoid a sandbox with
         // unrestricted connectivity.
         if let Some(ref v) = veth {
@@ -92,8 +109,10 @@ pub fn enforce_allowlist(
 /// nftables rules vanish automatically. This cleans up the host-side
 /// veth interface and iptables masquerade rule.
 pub fn cleanup(enforcement: &NetworkEnforcement) -> Result<()> {
-    // nftables cleanup is best-effort (namespace may already be gone).
-    let _ = nftables::cleanup_in_netns(enforcement.sandbox_pid);
+    // Do NOT nsenter /proc/{sandbox_pid}/ns/net here: by the time cleanup()
+    // runs, waitpid() has already reaped the child, so the PID may have been
+    // reused by an unrelated process (TOCTOU). The netns and its nftables
+    // rules are destroyed automatically when the last process exits it.
 
     // veth cleanup removes host-side interface + NAT rule.
     if let Some(ref v) = enforcement.veth {
@@ -107,11 +126,16 @@ pub fn cleanup(enforcement: &NetworkEnforcement) -> Result<()> {
 ///
 /// Used by the DNS proxy when resolving wildcard domains that produce
 /// new IP addresses at runtime.
+///
+/// `netns_fd` is held by the caller — `NetworkEnforcement.sandbox_pid`
+/// is for logging only and MUST NOT be re-resolved into a netns path
+/// (PID-reuse TOCTOU; see `cleanup` and the doc on
+/// `nftables::apply_in_netns`).
 pub fn add_dynamic_endpoint(
-    enforcement: &NetworkEnforcement,
+    netns_fd: std::os::fd::BorrowedFd<'_>,
     addr: std::net::IpAddr,
     port: u16,
     protocol: &str,
 ) -> std::result::Result<(), NetpolError> {
-    nftables::add_dynamic_rule(enforcement.sandbox_pid, addr, port, protocol)
+    nftables::add_dynamic_rule(netns_fd, addr, port, protocol)
 }

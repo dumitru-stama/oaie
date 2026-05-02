@@ -127,6 +127,7 @@ pub const SYS_FSMOUNT: u64 = 432;
 pub const SYS_MOVE_MOUNT: u64 = 429;
 pub const SYS_OPEN_TREE: u64 = 428;
 pub const SYS_PIDFD_GETFD: u64 = 438;
+pub const SYS_OPENAT2: u64 = 437;
 pub const SYS_PIDFD_OPEN: u64 = 434;
 pub const SYS_PIDFD_SEND_SIGNAL: u64 = 424;
 

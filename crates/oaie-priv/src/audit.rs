@@ -22,6 +22,8 @@ pub fn log_action(
     let uid_str = caller_uid.map_or("?".into(), |u| u.to_string());
     let pid_str = caller_pid.map_or("?".into(), |p| p.to_string());
 
+    // Strip line terminators so caller-supplied text cannot forge audit entries.
+    let result = result.replace(['\n', '\r'], " ");
     let line = format!("{timestamp} uid={uid_str} pid={pid_str} {action} {result}\n");
 
     // Best-effort append — ignore all errors.

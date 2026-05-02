@@ -130,3 +130,101 @@ pub fn validate_limits(limits: &CgroupLimits) -> Result<(), String> {
 
     Ok(())
 }
+
+/// Validate a Linux network interface name: 1–15 chars (IFNAMSIZ-1),
+/// alphanumeric / `-` / `_` / `.` only.
+pub fn validate_iface_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 15 {
+        return Err(format!("interface name must be 1–15 characters, got {}", name.len()));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err("interface name contains invalid characters".into());
+    }
+    Ok(())
+}
+
+/// Validate an IPv4 CIDR subnet: digits / `.` / `/` only, 1–18 chars.
+pub fn validate_subnet(subnet: &str) -> Result<(), String> {
+    if subnet.is_empty() || subnet.len() > 18 {
+        return Err(format!("subnet must be 1–18 characters, got {}", subnet.len()));
+    }
+    if !subnet.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '/') {
+        return Err("subnet contains invalid characters".into());
+    }
+    Ok(())
+}
+
+/// Maximum entries in a SetupNetns allowlist. The 64KB MAX_REQUEST_SIZE
+/// caps the JSON already, but an explicit count makes the bound visible
+/// at the validation layer.
+pub const MAX_ALLOW_RULES: usize = 256;
+
+/// Maximum addresses per rule (one nft line emitted per address).
+const MAX_ADDRS_PER_RULE: usize = 64;
+
+/// Validate a single netns allow-rule. Structural checks only — these
+/// fields are interpolated into nft commands on the privileged side, so
+/// every variable component must be a closed-form value (IpAddr is parsed
+/// by serde, port is u16, protocol is enum-checked, CIDR is parsed here).
+pub fn validate_allow_rule(rule: &crate::protocol::NetAllowRule) -> Result<(), String> {
+    // Protocol: closed set. The nft generator interpolates this string
+    // directly into "add rule ... {proto} dport ..." so it must be one of
+    // exactly two literals.
+    match rule.protocol.as_str() {
+        "tcp" | "udp" => {}
+        other => return Err(format!("protocol must be 'tcp' or 'udp', got '{other}'")),
+    }
+
+    // Port 0 is reserved/invalid for tcp/udp dport matching.
+    if rule.port == 0 {
+        return Err("port must be nonzero".into());
+    }
+
+    // Exactly one of (addrs, cidr) must carry data.
+    match (&rule.cidr, rule.addrs.is_empty()) {
+        (Some(_), false) => {
+            return Err("cidr and addrs are mutually exclusive".into());
+        }
+        (None, true) => {
+            return Err("rule must have either addrs or cidr".into());
+        }
+        _ => {}
+    }
+
+    if rule.addrs.len() > MAX_ADDRS_PER_RULE {
+        return Err(format!(
+            "rule has {} addrs, max {MAX_ADDRS_PER_RULE}",
+            rule.addrs.len()
+        ));
+    }
+
+    // CIDR: parse fully (not charset-only — "999.999.999.999/99" passes a
+    // charset check). The Display impl that the nft generator uses comes
+    // from this same parsed form, so what we validate is what we emit.
+    if let Some(ref cidr) = rule.cidr {
+        let (addr_part, prefix_part) = cidr
+            .split_once('/')
+            .ok_or_else(|| format!("cidr '{cidr}' missing '/'"))?;
+        let addr: std::net::IpAddr = addr_part
+            .parse()
+            .map_err(|_| format!("cidr '{cidr}' has invalid address"))?;
+        let prefix: u8 = prefix_part
+            .parse()
+            .map_err(|_| format!("cidr '{cidr}' has invalid prefix"))?;
+        let max_prefix = if addr.is_ipv4() { 32 } else { 128 };
+        if prefix > max_prefix {
+            return Err(format!(
+                "cidr '{cidr}' prefix {prefix} exceeds max {max_prefix}"
+            ));
+        }
+    }
+
+    // addrs: IpAddr was parsed by serde from the JSON wire form, so it's
+    // already structurally valid. The nft generator uses IpAddr's Display
+    // (canonical form, no injection vector). Nothing further to check.
+
+    Ok(())
+}

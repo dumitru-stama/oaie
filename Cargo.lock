@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-agent"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "oaie-cas",
  "oaie-cli",
@@ -919,11 +919,11 @@ dependencies = [
 
 [[package]]
 name = "oaie-bpf-common"
-version = "0.1.7"
+version = "0.2.0"
 
 [[package]]
 name = "oaie-cas"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "oaie-core",
  "serde",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-cgroup"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "libc",
  "nix 0.29.0",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-cli"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-core"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-db"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "oaie-core",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-firecracker"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "http",
  "http-body-util",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-guest"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "libc",
  "oaie-core",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-mcp"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "oaie-agent",
  "oaie-core",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-netpol"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "ipnet",
  "libc",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-observe"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "libbpf-rs",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-priv"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "libbpf-rs",
  "libc",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-report"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "oaie-core",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-sandbox"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "libc",
  "nix 0.29.0",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "oaie-tests"
-version = "0.1.7"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "chrono",

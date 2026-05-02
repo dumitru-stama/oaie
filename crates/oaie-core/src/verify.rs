@@ -53,7 +53,7 @@ pub enum CheckKind {
     /// Ed25519 manifest signature verification.
     ManifestSignature,
 
-    // ── Session verification checks (Phase M.3) ──
+    // ── Session verification checks ──
 
     /// session_manifest.toml exists in the session directory.
     SessionManifestExists,

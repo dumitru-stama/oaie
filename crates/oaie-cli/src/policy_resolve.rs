@@ -27,6 +27,14 @@ pub struct PolicyInput<'a> {
     pub timeout: Option<&'a str>,
     pub ro: &'a [PathBuf],
     pub rw: &'a [PathBuf],
+    /// Identity bind mounts (host path appears at the same path inside).
+    /// Unlike `ro`/`rw`, these don't go to `/mnt/{ro,rw}{i}` — they go
+    /// through `SandboxConfig.session_mounts` which supports arbitrary
+    /// targets. Needed by callers migrating from bwrap's `--bind X X`
+    /// model where the command references host-absolute paths.
+    pub bind_ro: &'a [PathBuf],
+    pub bind_rw: &'a [PathBuf],
+    pub bind_exec: &'a [PathBuf],
     pub no_auto_mount: bool,
     pub command: &'a [String],
     pub input: Option<&'a PathBuf>,
@@ -61,6 +69,11 @@ pub struct ResolvedPolicy {
     pub ro_mounts: Vec<PathBuf>,
     /// Read-write mount paths (policy + CLI + auto-mount RW).
     pub rw_mounts: Vec<PathBuf>,
+    /// Identity bind mounts: (host_path, writable, exec). target == source.
+    /// Flows to `SandboxConfig.session_mounts` — that's the only mount
+    /// type that takes an arbitrary target. Applied after /tmp tmpfs
+    /// (step 8) so a bind under /tmp punches through cleanly.
+    pub bind_mounts: Vec<(PathBuf, bool, bool)>,
     /// Paths denied from mounting.
     pub deny_paths: Vec<PathBuf>,
     /// Maximum address space in bytes.
@@ -71,6 +84,8 @@ pub struct ResolvedPolicy {
     pub max_pids: u32,
     /// Maximum file size in bytes (RLIMIT_FSIZE).
     pub max_fsize: u64,
+    /// Maximum open files (RLIMIT_NOFILE soft limit).
+    pub max_files: u64,
     /// Allow `memfd_create()`/`execveat()` through the seccomp filter.
     pub allow_memfd: bool,
     /// Bitmask of Linux capabilities to retain (0 = drop all). Only safe
@@ -140,6 +155,7 @@ pub fn resolve_policy(input: &PolicyInput<'_>) -> Result<ResolvedPolicy> {
     let max_time = policy::parse_duration_policy(&base.limits.max_time)?;
     let max_pids = base.limits.max_pids;
     let max_fsize = policy::parse_size(&base.limits.max_fsize)?;
+    let max_files = base.limits.max_files;
 
     // CLI --timeout overrides policy max_time.
     // Store default_timeout overrides the preset's default (used when no
@@ -200,6 +216,9 @@ pub fn resolve_policy(input: &PolicyInput<'_>) -> Result<ResolvedPolicy> {
     {
         let explicit_paths: Vec<PathBuf> = input.ro.iter()
             .chain(input.rw.iter())
+            .chain(input.bind_ro.iter())
+            .chain(input.bind_rw.iter())
+            .chain(input.bind_exec.iter())
             .cloned()
             .chain(base.mounts.ro.iter().map(|p| policy::expand_tilde(p)))
             .chain(base.mounts.rw.iter().map(|p| policy::expand_tilde(p)))
@@ -269,6 +288,24 @@ pub fn resolve_policy(input: &PolicyInput<'_>) -> Result<ResolvedPolicy> {
     // Parse cgroup mode from CLI flag.
     let cgroup_mode: CgroupMode = input.cgroup.parse()?;
 
+    // Identity bind mounts. Canonicalize now so a `--bind-rw ./scratch`
+    // resolves to an absolute path before it reaches SessionMount.target,
+    // and so nonexistent paths are caught early with a clear flag name in
+    // the error instead of a cryptic mount failure deep in sandbox setup.
+    let canon_bind = |paths: &[PathBuf], writable: bool, exec: bool, flag: &str| -> Result<Vec<(PathBuf, bool, bool)>> {
+        paths
+            .iter()
+            .map(|p| {
+                p.canonicalize()
+                    .map(|c| (c, writable, exec))
+                    .map_err(|e| OaieError::InvalidJobSpec(format!("{flag} {}: {e}", p.display())))
+            })
+            .collect()
+    };
+    let mut bind_mounts = canon_bind(input.bind_ro, false, false, "--bind-ro")?;
+    bind_mounts.extend(canon_bind(input.bind_rw, true, false, "--bind-rw")?);
+    bind_mounts.extend(canon_bind(input.bind_exec, false, true, "--bind-exec")?);
+
     Ok(ResolvedPolicy {
         name: base.name,
         network,
@@ -278,11 +315,13 @@ pub fn resolve_policy(input: &PolicyInput<'_>) -> Result<ResolvedPolicy> {
         output_dir: input.out.cloned(),
         ro_mounts,
         rw_mounts,
+        bind_mounts,
         deny_paths,
         max_memory,
         max_time,
         max_pids,
         max_fsize,
+        max_files,
         allow_memfd: base.limits.allow_memfd,
         retain_caps: policy::capability_mask(&base.limits.capabilities),
         auto_mounts,
@@ -304,12 +343,26 @@ impl ResolvedPolicy {
             max_pids: Some(self.max_pids),
             max_memory: Some(self.max_memory),
             max_fsize: Some(self.max_fsize),
+            max_files: Some(self.max_files),
             allow_memfd: self.allow_memfd,
             retain_caps: self.retain_caps,
             max_cpu_time: None, // Set by runner from effective timeout.
             interactive: false, // Set by backend, not policy.
             pty_slave_path: None,
-            session_mounts: vec![],
+            // Identity bind mounts: target = source. SessionMount is the only
+            // mount type with an arbitrary target; extra_ro/rw hardcode
+            // /mnt/{ro,rw}{i}. display() is safe for target — source was
+            // canonicalized in resolve_policy(), so it's absolute UTF-8.
+            session_mounts: self
+                .bind_mounts
+                .iter()
+                .map(|(p, w, e)| oaie_sandbox::sandbox::SessionMount {
+                    source: p.clone(),
+                    target: p.display().to_string(),
+                    writable: *w,
+                    exec: *e,
+                })
+                .collect(),
         }
     }
 }

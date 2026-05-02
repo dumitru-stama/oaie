@@ -22,6 +22,14 @@ fn main() {
     // Resolve store path from environment (same logic as oaie CLI).
     let store_path = resolve_store_path();
 
+    // Per-connection authorization state. MCP-over-stdio is one process
+    // per client connection (the client spawns this binary, talks to
+    // its stdin); when stdin closes, this process exits and the state
+    // dies with it. So `&mut` through the loop is per-connection
+    // without any explicit connection tracking. See McpState's doc
+    // comment for what this gates (read_output/verify run_id origin).
+    let mut state = tools::McpState::default();
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
@@ -47,8 +55,10 @@ fn main() {
                 // so any data already in BufReader's internal buffer is also
                 // consumed.
                 buf.clear();
-                reader.get_mut().set_limit(u64::MAX);
                 loop {
+                    // Keep the Take cap in place while draining so each chunk
+                    // is bounded; never call read_line with the limit lifted.
+                    reader.get_mut().set_limit((MAX_LINE_BYTES + 1) as u64);
                     match reader.read_line(&mut buf) {
                         Ok(0) | Err(_) => break,
                         // Found the line terminator — remainder consumed.
@@ -104,7 +114,7 @@ fn main() {
             continue;
         }
 
-        let response = handle_request(&request, &store_path);
+        let response = handle_request(&request, &store_path, &mut state);
 
         // Notifications (no id) don't get a response.
         if let Some(resp) = response {
@@ -118,7 +128,11 @@ fn main() {
 /// Handle a single JSON-RPC request and return the response (if any).
 ///
 /// Returns `None` for notifications (requests without an id).
-fn handle_request(req: &Request, store_path: &str) -> Option<Response> {
+fn handle_request(
+    req: &Request,
+    store_path: &str,
+    state: &mut tools::McpState,
+) -> Option<Response> {
     match req.method.as_str() {
         "initialize" => Some(Response::ok(
             req.id.clone(),
@@ -149,6 +163,7 @@ fn handle_request(req: &Request, store_path: &str) -> Option<Response> {
                 tool_name,
                 &arguments,
                 store_path,
+                state,
             ))
         }
 

@@ -96,18 +96,25 @@ pub(crate) fn spawn_interactive_and_capture(
 
     let canonicalize_extra =
         |paths: &[std::path::PathBuf], label: &str| -> Result<Vec<std::path::PathBuf>> {
+            // Same exemptions as backend_namespace — see the comment there
+            // for why /etc/java, /etc/ssl, /etc/alternatives are carved out.
             let denied = ["/proc", "/sys", "/dev", "/boot", "/root", "/etc", "/var/run"];
+            let etc_allow = ["/etc/ssl", "/etc/ca-certificates", "/etc/alternatives",
+                             "/etc/java", "/etc/ld.so", "/etc/localtime", "/etc/timezone"];
             paths
                 .iter()
                 .map(|p| {
                     let canon = std::fs::canonicalize(p)?;
-                    for prefix in &denied {
-                        if canon.starts_with(prefix) {
-                            return Err(OaieError::SandboxError(format!(
-                                "refusing to mount {label} path {}: sensitive path",
-                                canon.display()
-                            )));
-                        }
+                    // String prefix on the allow side — /etc/java-21-openjdk
+                    // must match /etc/java (component-wise starts_with fails).
+                    let canon_str = canon.to_string_lossy();
+                    let sensitive = denied.iter().any(|d| canon.starts_with(d))
+                        && !etc_allow.iter().any(|a| canon_str.starts_with(a));
+                    if sensitive {
+                        return Err(OaieError::SandboxError(format!(
+                            "refusing to mount {label} path {}: sensitive path",
+                            canon.display()
+                        )));
                     }
                     Ok(canon)
                 })
@@ -116,6 +123,32 @@ pub(crate) fn spawn_interactive_and_capture(
 
     let extra_ro = canonicalize_extra(&policy.ro_mounts, "--ro")?;
     let extra_rw = canonicalize_extra(&policy.rw_mounts, "--rw")?;
+
+    // Identity bind mounts — same conversion as backend_namespace. Without
+    // this, `oaie run -i --bind-rw /scratch` would accept the flag, resolve
+    // it into policy.bind_mounts, and then silently drop it here.
+    let denied = ["/proc", "/sys", "/dev", "/boot", "/root", "/etc", "/var/run"];
+    let session_mounts: Vec<oaie_sandbox::sandbox::SessionMount> = policy
+        .bind_mounts
+        .iter()
+        .map(|(p, writable, exec)| {
+            for prefix in &denied {
+                if p.starts_with(prefix) {
+                    return Err(OaieError::SandboxError(format!(
+                        "refusing --bind-{} {}: sensitive path",
+                        if *exec { "exec" } else if *writable { "rw" } else { "ro" },
+                        p.display()
+                    )));
+                }
+            }
+            Ok(oaie_sandbox::sandbox::SessionMount {
+                source: p.clone(),
+                target: p.display().to_string(),
+                writable: *writable,
+                exec: *exec,
+            })
+        })
+        .collect::<Result<_>>()?;
 
     // ── Build sandbox config ──
 
@@ -130,12 +163,13 @@ pub(crate) fn spawn_interactive_and_capture(
         max_pids: Some(policy.max_pids),
         max_memory: Some(policy.max_memory),
         max_fsize: Some(policy.max_fsize),
+        max_files: Some(policy.max_files),
         allow_memfd: policy.allow_memfd,
         retain_caps: policy.retain_caps,
         max_cpu_time: cpu_time_limit,
         interactive: true,
         pty_slave_path: None, // Set internally by spawn_sandboxed_interactive.
-        session_mounts: vec![],
+        session_mounts,
     };
 
     let env_vars = vec![
@@ -161,6 +195,15 @@ pub(crate) fn spawn_interactive_and_capture(
                     };
                     cgroup_limits_applied =
                         oaie_cgroup::limits::apply_limits(&scope.path, &limits);
+                    if policy.cgroup_mode == CgroupMode::Require
+                        && !cgroup_limits_applied.all_requested_applied(&limits)
+                    {
+                        return Err(OaieError::SandboxError(
+                            "cgroup limits required (--cgroup require) but one or more \
+                             control-file writes failed; see warnings above"
+                                .into(),
+                        ));
+                    }
                     cgroup_scope = Some(scope);
                 }
                 Err(e) => {
@@ -522,10 +565,10 @@ pub(crate) fn spawn_interactive_and_capture(
     if let Some(writer) = event_writer {
         let tracer = PtraceTracer::new(pid, writer, effective_timeout);
         match tracer.run() {
-            Ok((exit_code, writer, _io_uring)) => {
+            Ok((exit_code, writer, _io_uring, dropped)) => {
                 let _ = input_handle.join();
                 let _ = output_handle.join();
-                return Ok(build_result(exit_code, start.elapsed(), Some(writer), 0));
+                return Ok(build_result(exit_code, start.elapsed(), Some(writer), dropped));
             }
             Err(e) => {
                 let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
@@ -554,7 +597,7 @@ pub(crate) fn spawn_interactive_and_capture(
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
                     let _ = input_handle.join();
                     let _ = output_handle.join();
-                    return Ok(build_result(-(sig as i32), start.elapsed(), None, 0));
+                    return Ok(build_result(128 + (sig as i32), start.elapsed(), None, 0));
                 }
                 Ok(WaitStatus::StillAlive) => {}
                 Ok(_) => {}
@@ -612,7 +655,7 @@ pub(crate) fn spawn_interactive_and_capture(
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
                     let _ = input_handle.join();
                     let _ = output_handle.join();
-                    return Ok(build_result(-(sig as i32), start.elapsed(), None, 0));
+                    return Ok(build_result(128 + (sig as i32), start.elapsed(), None, 0));
                 }
                 Ok(WaitStatus::StillAlive) => {}
                 Ok(_) => {}

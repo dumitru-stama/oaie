@@ -74,9 +74,7 @@ fn default_sqlite_path() -> String {
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
-        Self::Sqlite {
-            path: default_sqlite_path(),
-        }
+        Self::Sqlite { path: default_sqlite_path() }
     }
 }
 
@@ -140,6 +138,26 @@ pub struct SigningConfig {
     /// unless `--sign` overrides it or signing is explicitly disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_key: Option<String>,
+
+    /// Public keys (hex-encoded Ed25519, 64 chars each) trusted for
+    /// `oaie verify`.
+    ///
+    /// This is the trust anchor. Without it, `verify_signature()` could
+    /// only check that A signature is valid for THE public key embedded
+    /// in `signature.toml` — but `signature.toml` is the file under
+    /// verification. Anyone with `ed25519-dalek` can generate a keypair,
+    /// sign any manifest, and embed their pubkey + chosen `signer_label`
+    /// in the sidecar; the Ed25519 math checks out, the trust does not.
+    ///
+    /// **Empty list** (the default) means `oaie verify` reports
+    /// `CheckStatus::Skip` for the signature check, NOT `Pass`. There is
+    /// no value of this list that admits a self-attesting signature.
+    ///
+    /// Populate from `oaie key list --json | jq '.[].public_key'` for
+    /// keys you generated locally, plus any keys you've received
+    /// out-of-band from collaborators whose runs you want to verify.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_public_keys: Vec<String>,
 }
 
 /// Configurable limits on output artifact collection per run.
@@ -156,11 +174,21 @@ pub struct ArtifactLimits {
     pub max_output_total: u64,
 }
 
-fn default_max_output_files() -> u64 { DEFAULT_MAX_OUTPUT_FILES }
-fn default_max_output_file_size() -> u64 { DEFAULT_MAX_OUTPUT_FILE_SIZE }
-fn default_max_output_total() -> u64 { DEFAULT_MAX_OUTPUT_TOTAL }
-fn default_timeout() -> String { DEFAULT_TIMEOUT.into() }
-fn default_max_timeout() -> String { DEFAULT_MAX_TIMEOUT.into() }
+fn default_max_output_files() -> u64 {
+    DEFAULT_MAX_OUTPUT_FILES
+}
+fn default_max_output_file_size() -> u64 {
+    DEFAULT_MAX_OUTPUT_FILE_SIZE
+}
+fn default_max_output_total() -> u64 {
+    DEFAULT_MAX_OUTPUT_TOTAL
+}
+fn default_timeout() -> String {
+    DEFAULT_TIMEOUT.into()
+}
+fn default_max_timeout() -> String {
+    DEFAULT_MAX_TIMEOUT.into()
+}
 
 impl Default for ArtifactLimits {
     fn default() -> Self {
@@ -222,15 +250,11 @@ impl StoreConfig {
             return Ok(None);
         }
         let content = std::fs::read_to_string(&path)?;
-        let config: Self = toml::from_str(&content)
-            .map_err(|e| OaieError::Io(std::io::Error::other(format!("config.toml: {e}"))))?;
+        let config: Self = toml::from_str(&content).map_err(|e| OaieError::Io(std::io::Error::other(format!("config.toml: {e}"))))?;
 
         // Reject configs from future versions we don't understand.
         if config.version > 1 {
-            return Err(OaieError::Io(std::io::Error::other(format!(
-                "config.toml version {} is newer than this binary supports (1); upgrade oaie",
-                config.version
-            ))));
+            return Err(OaieError::Io(std::io::Error::other(format!("config.toml version {} is newer than this binary supports (1); upgrade oaie", config.version))));
         }
 
         Ok(Some(config))
@@ -245,14 +269,9 @@ impl StoreConfig {
         let config_path = store_root.join("config.toml");
         // Include PID + thread ID to avoid collisions between concurrent writers
         // in the same process (PID alone is not unique across threads).
-        let tmp_name = format!(
-            ".config.toml.{}.{:?}.tmp",
-            std::process::id(),
-            std::thread::current().id(),
-        );
+        let tmp_name = format!(".config.toml.{}.{:?}.tmp", std::process::id(), std::thread::current().id(),);
         let tmp_path = store_root.join(tmp_name);
-        let toml_str = toml::to_string_pretty(self)
-            .map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
+        let toml_str = toml::to_string_pretty(self).map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
         let result = (|| -> Result<()> {
             let mut f = std::fs::File::create(&tmp_path)?;
             f.write_all(toml_str.as_bytes())?;

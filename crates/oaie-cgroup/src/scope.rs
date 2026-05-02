@@ -40,7 +40,10 @@ impl CgroupScope {
     /// Without the holder, there's a race between `/bin/true` exiting and
     /// systemd garbage-collecting the empty scope.
     pub fn create_systemd(run_id: &RunId) -> Result<Self> {
-        let short = &run_id.full()[..12.min(run_id.full().len())];
+        // Use the full simple-form UUID (32 hex chars, no hyphens) so the
+        // unit name carries all 122 bits of the RunId. The hyphenated form's
+        // 12-char prefix is timestamp-only and collides for concurrent runs.
+        let short = run_id.as_uuid().simple().to_string();
         let unit_name = format!("oaie-run-{short}.scope");
 
         // Spawn systemd-run with `sleep 3600` as a holder process.
@@ -151,6 +154,10 @@ impl Drop for CgroupScope {
         }
         if let Some(ref unit) = self.unit_name {
             crate::cleanup::cleanup_systemd_scope(unit);
+        } else if self.method == CgroupMethod::OaiePriv {
+            // /sys/fs/cgroup/oaie/ is root-owned; the unprivileged supervisor
+            // cannot rmdir under it. Ask oaie-priv to remove what it created.
+            let _ = crate::priv_client::cleanup_cgroup(&self.path);
         } else {
             crate::cleanup::cleanup_cgroup_dir(&self.path);
         }

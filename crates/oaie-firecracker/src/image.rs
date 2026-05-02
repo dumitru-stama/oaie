@@ -191,6 +191,15 @@ pub fn extract_file(image_path: &Path, file_name: &str, dest_path: &Path) -> Res
             format!("invalid filename for extraction: {file_name:?}"),
         )));
     }
+    // Reject if dest already exists — the exists() check after debugfs
+    // assumes debugfs created the file. A pre-existing dest would make a
+    // non-zero exit indistinguishable from success.
+    if dest_path.exists() {
+        return Err(OaieError::Io(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("extract_file: destination already exists: {}", dest_path.display()),
+        )));
+    }
     let dump_cmd = format!("dump /{} {}", file_name, dest_path.display());
     let output = Command::new("debugfs")
         .args(["-R", &dump_cmd])
@@ -203,15 +212,14 @@ pub fn extract_file(image_path: &Path, file_name: &str, dest_path: &Path) -> Res
             ))
         })?;
 
-    if !output.status.success() {
+    // debugfs -R exits 0 even when the dump request fails (errors go to
+    // stderr only). The only reliable success signal is whether dest_path
+    // was actually created — we verified above that it did not pre-exist.
+    if !dest_path.exists() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // debugfs prints errors to stderr but may still succeed
-        // (it often prints warnings). Check if the file was created.
-        if !dest_path.exists() {
-            return Err(OaieError::Io(std::io::Error::other(
-                format!("debugfs dump failed for {file_name}: {stderr}"),
-            )));
-        }
+        return Err(OaieError::Io(std::io::Error::other(
+            format!("debugfs dump failed for {file_name}: {stderr}"),
+        )));
     }
 
     Ok(())

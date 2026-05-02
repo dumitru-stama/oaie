@@ -84,28 +84,104 @@ pub(crate) fn spawn_sandboxed_and_capture(
     // Canonicalize extra mount paths and reject sensitive system targets.
     // These are non-overridable system-level checks — policy deny validation
     // happens inside resolve_policy() using the same policy load.
+    //
+    // /etc is mostly secrets (shadow, ssh/, sudoers) but also holds benign
+    // config that programs need via symlinks from /usr: Debian symlinks
+    // /usr/lib/jvm/.../conf/security/java.security → /etc/java-*/security/,
+    // /usr/bin/java → /etc/alternatives/java, TLS tools need /etc/ssl/certs.
+    // Blanket-denying /etc means a JVM under the sandbox can't initialize
+    // ("Error loading java.security file") even though /usr is fully
+    // mounted. Carve out the known-safe config dirs: they hold no secrets,
+    // they're read-only on most systems, and without them half of /usr is
+    // broken symlinks. Still blocks /etc/shadow, /etc/ssh, /etc/sudoers —
+    // those aren't under any prefix in the allow list.
+    const DENIED: &[&str] = &["/proc", "/sys", "/dev", "/boot", "/root", "/etc", "/var/run"];
+    const ETC_ALLOW: &[&str] = &[
+        "/etc/ssl",           // TLS cert bundles — anything doing HTTPS
+        "/etc/ca-certificates",
+        "/etc/alternatives",  // Debian update-alternatives symlink farm
+        "/etc/java",          // prefix: /etc/java-21-openjdk/ etc. — JVM config
+        "/etc/ld.so",         // prefix: ld.so.cache, ld.so.conf — dynamic linker
+        "/etc/localtime",
+        "/etc/timezone",
+    ];
+    let is_sensitive = |p: &std::path::Path| -> bool {
+        // Deny uses Path::starts_with (component-wise: /etc/shadow is under
+        // /etc, but /etcfoo isn't). Allow uses STRING prefix because
+        // /etc/java-21-openjdk must match /etc/java as a prefix, and
+        // component-wise "java-21-openjdk" != "java". The denied prefixes
+        // are all full components so Path semantics are correct there;
+        // only the allow side wants substring-prefix on versioned dirs.
+        let p_str = p.to_string_lossy();
+        for deny in DENIED {
+            if p.starts_with(deny) {
+                for allow in ETC_ALLOW {
+                    if p_str.starts_with(allow) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    };
     let canonicalize_extra =
         |paths: &[std::path::PathBuf], label: &str| -> Result<Vec<std::path::PathBuf>> {
-            let denied = ["/proc", "/sys", "/dev", "/boot", "/root", "/etc", "/var/run"];
             paths
                 .iter()
                 .map(|p| {
                     let canon = std::fs::canonicalize(p)?;
-                    for prefix in &denied {
-                        if canon.starts_with(prefix) {
-                            return Err(OaieError::SandboxError(format!(
-                                "refusing to mount {label} path {}: sensitive path",
-                                canon.display()
-                            )));
-                        }
+                    if is_sensitive(&canon) {
+                        return Err(OaieError::SandboxError(format!(
+                            "refusing to mount {label} path {}: sensitive path",
+                            canon.display()
+                        )));
                     }
                     Ok(canon)
                 })
                 .collect()
         };
 
+    // input_dir gets the SAME sensitivity gate as extra_ro/rw and bind_mounts
+    // below. Of the three mount sources, this is the only one an agent can
+    // steer (via DispatchRequest.inputs → session_runner's call_input_dir);
+    // the other two come from operator-authored policy. Without this check,
+    // an agent that names a host-side staged input under /etc or /root
+    // (after dodging the artifacts-dir gate via a symlink the supervisor
+    // copied) gets that bind-mounted RO at /in. Belt-and-braces with the
+    // canonicalize+starts_with(artifacts_canon) check upstream.
+    if is_sensitive(&input_dir) {
+        return Err(OaieError::SandboxError(format!(
+            "refusing to mount input dir {}: sensitive path",
+            input_dir.display()
+        )));
+    }
+
     let extra_ro = canonicalize_extra(&policy.ro_mounts, "--ro")?;
     let extra_rw = canonicalize_extra(&policy.rw_mounts, "--rw")?;
+
+    // Identity bind mounts: target == source. Same sensitivity check as
+    // extra_ro/rw above. Paths were canonicalized in resolve_policy() so
+    // the starts_with here can't be dodged with a symlink.
+    let session_mounts: Vec<oaie_sandbox::sandbox::SessionMount> = policy
+        .bind_mounts
+        .iter()
+        .map(|(p, writable, exec)| {
+            if is_sensitive(p) {
+                return Err(OaieError::SandboxError(format!(
+                    "refusing --bind-{} {}: sensitive path",
+                    if *exec { "exec" } else if *writable { "rw" } else { "ro" },
+                    p.display()
+                )));
+            }
+            Ok(oaie_sandbox::sandbox::SessionMount {
+                source: p.clone(),
+                target: p.display().to_string(),
+                writable: *writable,
+                exec: *exec,
+            })
+        })
+        .collect::<Result<_>>()?;
 
     // Build sandbox config from resolved policy.
     // CPU time backstop: 2× the wall-clock timeout so CPU-intensive tools
@@ -121,12 +197,13 @@ pub(crate) fn spawn_sandboxed_and_capture(
         max_pids: Some(policy.max_pids),
         max_memory: Some(policy.max_memory),
         max_fsize: Some(policy.max_fsize),
+        max_files: Some(policy.max_files),
         allow_memfd: policy.allow_memfd,
         retain_caps: policy.retain_caps,
         max_cpu_time: cpu_time_limit,
         interactive: false,
         pty_slave_path: None,
-        session_mounts: vec![],
+        session_mounts,
     };
 
     let env_vars = vec![
@@ -155,6 +232,15 @@ pub(crate) fn spawn_sandboxed_and_capture(
                     };
                     cgroup_limits_applied =
                         oaie_cgroup::limits::apply_limits(&scope.path, &limits);
+                    if policy.cgroup_mode == CgroupMode::Require
+                        && !cgroup_limits_applied.all_requested_applied(&limits)
+                    {
+                        return Err(OaieError::SandboxError(
+                            "cgroup limits required (--cgroup require) but one or more \
+                             control-file writes failed; see warnings above"
+                                .into(),
+                        ));
+                    }
                     cgroup_scope = Some(scope);
                 }
                 Err(e) => {
@@ -419,10 +505,10 @@ pub(crate) fn spawn_sandboxed_and_capture(
     if let Some(writer) = event_writer {
         let tracer = PtraceTracer::new(pid, writer, effective_timeout);
         match tracer.run() {
-            Ok((exit_code, writer, _io_uring)) => {
+            Ok((exit_code, writer, _io_uring, dropped)) => {
                 check_tee_thread(stdout_handle, "stdout")?;
                 check_tee_thread(stderr_handle, "stderr")?;
-                return Ok(build_result(exit_code, start.elapsed(), Some(writer), 0));
+                return Ok(build_result(exit_code, start.elapsed(), Some(writer), dropped));
             }
             Err(e) => {
                 // Kill any remaining traced processes.
@@ -458,7 +544,11 @@ pub(crate) fn spawn_sandboxed_and_capture(
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
                     check_tee_thread(stdout_handle, "stdout")?;
                     check_tee_thread(stderr_handle, "stderr")?;
-                    return Ok(build_result(-(sig as i32), start.elapsed(), None, 0));
+                    // 128 + signal: Unix convention (what $? shows). Avoids
+                    // colliding with the -1 ECHILD sentinel below — at
+                    // SIGHUP the manifest couldn't otherwise tell "killed
+                    // by SIGHUP" from "waitpid lost the child".
+                    return Ok(build_result(128 + (sig as i32), start.elapsed(), None, 0));
                 }
                 Ok(WaitStatus::StillAlive) => {}
                 Ok(_) => {} // other states, keep waiting
@@ -501,7 +591,7 @@ pub(crate) fn spawn_sandboxed_and_capture(
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
                     check_tee_thread(stdout_handle, "stdout")?;
                     check_tee_thread(stderr_handle, "stderr")?;
-                    return Ok(build_result(-(sig as i32), start.elapsed(), None, 0));
+                    return Ok(build_result(128 + (sig as i32), start.elapsed(), None, 0));
                 }
                 Ok(WaitStatus::StillAlive) => {}
                 Ok(_) => {}
@@ -516,29 +606,18 @@ pub(crate) fn spawn_sandboxed_and_capture(
             }
 
             if signal_received_since(signal_baseline) {
-                let _ = signal::kill(pid, signal::Signal::SIGTERM);
-                let kill_deadline = Instant::now() + Duration::from_secs(3);
-                loop {
-                    match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                        Ok(WaitStatus::StillAlive) if Instant::now() < kill_deadline => {
-                            std::thread::sleep(Duration::from_millis(50));
-                        }
-                        Ok(WaitStatus::Exited(_, code)) => {
-                            // Interrupt path: best-effort tee cleanup.
-                            let _ = stdout_handle.join();
-                            let _ = stderr_handle.join();
-                            return Ok(build_result(code, start.elapsed(), None, 0));
-                        }
-                        _ => {
-                            let _ = signal::kill(pid, signal::Signal::SIGKILL);
-                            let _ = waitpid(pid, None);
-                            // Kill path: best-effort tee cleanup.
-                            let _ = stdout_handle.join();
-                            let _ = stderr_handle.join();
-                            return Ok(build_result(-1, start.elapsed(), None, 0));
-                        }
-                    }
-                }
+                // The child is PID 1 inside its PID namespace, where signals
+                // without an installed handler are IGNORED (not default-
+                // action). Most commands we run (sh, …) don't install a
+                // SIGTERM handler, so a TERM-then-KILL sequence would just
+                // burn the grace period. SIGKILL can't be ignored, and when
+                // PID 1 in a PID namespace dies the kernel SIGKILLs the rest
+                // of the namespace — no need to chase grandchildren.
+                let _ = signal::kill(pid, signal::Signal::SIGKILL);
+                let _ = waitpid(pid, None);
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return Ok(build_result(-1, start.elapsed(), None, 0));
             }
 
             std::thread::sleep(Duration::from_millis(1));
@@ -587,7 +666,7 @@ fn run_with_ebpf_tracing(
                     break;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    exit_code = -(sig as i32);
+                    exit_code = 128 + (sig as i32);
                     break;
                 }
                 Ok(WaitStatus::StillAlive) => {}
@@ -620,7 +699,7 @@ fn run_with_ebpf_tracing(
                     break;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    exit_code = -(sig as i32);
+                    exit_code = 128 + (sig as i32);
                     break;
                 }
                 Ok(WaitStatus::StillAlive) => {}
@@ -677,7 +756,7 @@ fn graceful_kill_ebpf(pid: nix::unistd::Pid) -> i32 {
     loop {
         match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Exited(_, code)) => return code,
-            Ok(WaitStatus::Signaled(_, sig, _)) => return -(sig as i32),
+            Ok(WaitStatus::Signaled(_, sig, _)) => return 128 + (sig as i32),
             Ok(WaitStatus::StillAlive) if Instant::now() < kill_deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }

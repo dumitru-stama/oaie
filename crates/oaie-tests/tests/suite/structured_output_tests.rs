@@ -145,9 +145,13 @@ fn policy_list_presets() {
 fn agent_safe_preset_values() {
     let p = Policy::preset_agent_safe();
     assert!(!p.defaults.network.has_connectivity());
-    assert_eq!(p.limits.max_memory, "256M");
+    // RLIMIT_AS, not RSS — must accommodate library mappings the kernel
+    // never faults in (real workloads can VmPeak well above their RSS).
+    assert_eq!(p.limits.max_memory, "1G");
     assert_eq!(p.limits.max_time, "2m");
-    assert_eq!(p.limits.max_pids, 64);
+    // RLIMIT_NPROC is kuid-keyed (host-wide), not per-jail, so it must
+    // clear the operator's whole working set plus a thread burst.
+    assert_eq!(p.limits.max_pids, 512);
     assert_eq!(p.limits.max_fsize, "256M");
     assert!(!p.limits.allow_memfd);
 }
@@ -158,7 +162,7 @@ fn agent_net_preset_values() {
     assert!(p.defaults.network.has_connectivity());
     assert_eq!(p.limits.max_memory, "512M");
     assert_eq!(p.limits.max_time, "5m");
-    assert_eq!(p.limits.max_pids, 64);
+    assert_eq!(p.limits.max_pids, 256);
     assert_eq!(p.limits.max_fsize, "256M");
     assert!(!p.limits.allow_memfd);
 }
@@ -178,8 +182,11 @@ fn agent_build_preset_values() {
 fn agent_analyze_preset_values() {
     let p = Policy::preset_agent_analyze();
     assert!(!p.defaults.network.has_connectivity());
-    assert_eq!(p.limits.max_memory, "1G");
-    assert_eq!(p.limits.max_time, "15m");
+    // RLIMIT_AS for analysis workloads: JVM-style runtimes reserve
+    // ranges they never fault in, so AS is much larger than RSS.
+    assert_eq!(p.limits.max_memory, "12G");
+    // Ceiling — the caller's own timeout is expected to be tighter.
+    assert_eq!(p.limits.max_time, "45m");
     assert_eq!(p.limits.max_pids, 128);
     assert_eq!(p.limits.max_fsize, "512M");
     assert!(p.limits.allow_memfd);
@@ -201,10 +208,14 @@ fn policy_to_toml_roundtrip() {
     // Should contain the policy name.
     assert!(toml_str.contains("agent-safe"), "TOML should contain the name");
 
-    // Should parse back.
+    // Should parse back. Pin a value to prove the trip was lossless;
+    // which value doesn't matter as long as it tracks the preset (so
+    // a preset edit makes you look here, and a serde regression that
+    // drops the field fails here).
     let parsed: Policy = toml::from_str(&toml_str).unwrap();
     assert_eq!(parsed.name.as_deref(), Some("agent-safe"));
-    assert_eq!(parsed.limits.max_memory, "256M");
+    assert_eq!(parsed.limits.max_memory, policy.limits.max_memory);
+    assert_eq!(parsed.limits.max_pids, policy.limits.max_pids);
 }
 
 // ── JobSpec JSON input ──

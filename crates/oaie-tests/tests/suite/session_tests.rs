@@ -84,9 +84,7 @@ fn test_session_types_serde() {
 fn test_session_event_hash_chain() {
     let mut writer = SessionEventWriter::new(HashAlgorithm::Blake3);
 
-    writer.emit(SessionEventKind::SessionStart {
-        command: vec!["echo".into(), "hello".into()],
-    });
+    writer.emit(SessionEventKind::SessionStart { command: vec!["echo".into(), "hello".into()] });
     writer.emit(SessionEventKind::ToolDispatch {
         call_id: "call-1".into(),
         command: vec!["echo".into(), "hello".into()],
@@ -97,9 +95,7 @@ fn test_session_event_hash_chain() {
         exit_code: 0,
         trace_hash: None,
     });
-    writer.emit(SessionEventKind::SessionStop {
-        status: "stopped".into(),
-    });
+    writer.emit(SessionEventKind::SessionStop { status: "stopped".into() });
 
     assert_eq!(writer.event_count(), 4);
 
@@ -109,10 +105,7 @@ fn test_session_event_hash_chain() {
 
     // Parse NDJSON and verify chain integrity.
     let text = std::str::from_utf8(&ndjson_bytes).unwrap();
-    let events: Vec<SessionEvent> = text
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let events: Vec<SessionEvent> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
 
     assert_eq!(events.len(), 4);
 
@@ -127,10 +120,7 @@ fn test_session_event_hash_chain() {
     }
 
     // Chain tip should differ from genesis hash.
-    assert_ne!(
-        chain_tip, events[0].prev_hash,
-        "chain tip should differ from genesis"
-    );
+    assert_ne!(chain_tip, events[0].prev_hash, "chain tip should differ from genesis");
 }
 
 // ── Test 3: Budget defaults ──
@@ -200,8 +190,7 @@ fn test_session_db_insert_get() {
     assert_eq!(fetched.policy.as_deref(), Some("safe"));
 
     // Complete the session.
-    db.complete_session(&session_id, "stopped", Some("hash123"), None)
-        .unwrap();
+    db.complete_session(&session_id, "stopped", Some("hash123"), None).unwrap();
 
     let updated = db.get_session(&session_id).unwrap().unwrap();
     assert_eq!(updated.status, "stopped");
@@ -266,8 +255,7 @@ fn test_session_call_db() {
     .unwrap();
 
     // Create runs for FK constraint.
-    let run_id1 =
-        oaie_tests::insert_test_run(&db, &["echo", "hello"], oaie_db::RunStatus::Completed);
+    let run_id1 = oaie_tests::insert_test_run(&db, &["echo", "hello"], oaie_db::RunStatus::Completed);
     let run_id2 = oaie_tests::insert_test_run(&db, &["ls"], oaie_db::RunStatus::Completed);
 
     db.insert_session_call(&SessionCallRecord {
@@ -315,8 +303,7 @@ fn test_session_run_simple() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -352,8 +339,7 @@ fn test_session_run_with_budget() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -362,8 +348,7 @@ fn test_session_run_with_budget() {
     // Verify budget is stored in DB.
     let db = OaieDb::open(&store.db_path).unwrap();
     let record = db.get_session(&session_id).unwrap().unwrap();
-    let budget: SessionBudget =
-        serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
+    let budget: SessionBudget = serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
     assert_eq!(budget.max_tool_calls, 10);
     assert_eq!(budget.max_wall_time_s, 60);
     assert_eq!(budget.max_output_bytes, 1_000_000);
@@ -391,6 +376,10 @@ fn test_session_budget_tool_calls_enforced() {
             max_wall_time_s: 60,
             ..SessionBudget::default()
         },
+        // Host mode: the agent script lives at a host tempdir path that
+        // the sandbox's mount namespace can't see. This test exercises
+        // budget enforcement, not agent isolation, so opt out explicitly.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -424,31 +413,20 @@ s.close()
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
 
     // Only 3 tool calls should have succeeded.
-    assert_eq!(
-        result.tool_calls, 3,
-        "only 3 tool calls should succeed with budget=3"
-    );
+    assert_eq!(result.tool_calls, 3, "only 3 tool calls should succeed with budget=3");
 
     // Verify DB has exactly 3 session call records.
     let db = OaieDb::open(&store.db_path).unwrap();
     let calls = db.list_session_calls(&session_id).unwrap();
-    assert_eq!(
-        calls.len(),
-        3,
-        "DB should have exactly 3 session call records"
-    );
+    assert_eq!(calls.len(), 3, "DB should have exactly 3 session call records");
 }
 
 // ── Test 11: Wall time enforcement ──
@@ -467,19 +445,14 @@ fn test_session_budget_wall_time_enforced() {
     };
     let command = vec!["/bin/sleep".to_string(), "30".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
 
     let start = std::time::Instant::now();
     let result = session.run(&command, true).unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(result.state, SessionState::TimedOut);
-    assert!(
-        elapsed.as_secs() < 10,
-        "wall time enforcement should stop session quickly, took {}s",
-        elapsed.as_secs()
-    );
+    assert!(elapsed.as_secs() < 10, "wall time enforcement should stop session quickly, took {}s", elapsed.as_secs());
 }
 
 // ── Test 12: Session status shows budget ──
@@ -516,8 +489,7 @@ fn test_session_status_shows_budget() {
 
     // Retrieve and parse budget from DB.
     let record = db.get_session(&session_id).unwrap().unwrap();
-    let parsed: SessionBudget =
-        serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
+    let parsed: SessionBudget = serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
     assert_eq!(parsed.max_tool_calls, 25);
     assert_eq!(parsed.max_wall_time_s, 900);
     assert_eq!(parsed.max_tool_time_s, 300);
@@ -539,8 +511,7 @@ fn test_session_list_shows_sessions() {
             ..SessionConfig::default()
         };
         let command = vec!["/bin/true".to_string()];
-        let session =
-            SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+        let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
         let _ = session.run(&command, true).unwrap();
     }
 
@@ -562,8 +533,7 @@ fn test_session_manifest_written() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -572,26 +542,15 @@ fn test_session_manifest_written() {
     // Verify session_manifest.toml exists on disk.
     let session_dir = store.root.join("sessions").join(&session_id);
     let manifest_path = session_dir.join("session_manifest.toml");
-    assert!(
-        manifest_path.exists(),
-        "session_manifest.toml should exist at {manifest_path:?}"
-    );
+    assert!(manifest_path.exists(), "session_manifest.toml should exist at {manifest_path:?}");
 
     // Verify manifest is valid TOML with expected fields.
     let content = std::fs::read_to_string(&manifest_path).unwrap();
     let parsed: toml::Value = content.parse().unwrap();
 
-    let session_table = parsed
-        .get("session")
-        .expect("manifest should have [session] table");
-    assert_eq!(
-        session_table.get("session_id").and_then(|v| v.as_str()),
-        Some(session_id.as_str())
-    );
-    assert_eq!(
-        session_table.get("status").and_then(|v| v.as_str()),
-        Some("stopped")
-    );
+    let session_table = parsed.get("session").expect("manifest should have [session] table");
+    assert_eq!(session_table.get("session_id").and_then(|v| v.as_str()), Some(session_id.as_str()));
+    assert_eq!(session_table.get("status").and_then(|v| v.as_str()), Some("stopped"));
 }
 
 // ── Test 15: Event log stored in CAS ──
@@ -607,45 +566,30 @@ fn test_session_event_log_stored_in_cas() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
 
     // Read the session manifest to verify event chain info.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
 
-    assert!(
-        manifest_content.contains("chain_tip"),
-        "manifest should reference the event chain tip"
-    );
-    assert!(
-        manifest_content.contains("event_count"),
-        "manifest should contain event_count"
-    );
+    assert!(manifest_content.contains("chain_tip"), "manifest should reference the event chain tip");
+    assert!(manifest_content.contains("event_count"), "manifest should contain event_count");
 
     // Verify manifest blob exists in CAS.
     let manifest_hash = result.manifest_hash.unwrap();
-    let blob_path = store
-        .cas_dir
-        .join(&manifest_hash[0..2])
-        .join(&manifest_hash[2..4])
-        .join(&manifest_hash);
-    assert!(
-        blob_path.exists(),
-        "manifest blob should exist in CAS at {blob_path:?}"
-    );
+    let blob_path = store.cas_dir.join(&manifest_hash[0..2]).join(&manifest_hash[2..4]).join(&manifest_hash);
+    assert!(blob_path.exists(), "manifest blob should exist in CAS at {blob_path:?}");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Phase L: Containment Profile Tests
 // ═══════════════════════════════════════════════════════════════════════════
 
-use oaie_core::session::ContainmentProfile;
 use oaie_core::policy::Policy;
+use oaie_core::session::ContainmentProfile;
 
 // ── Test 16: Parse all 4 profiles, reject invalid ──
 
@@ -669,11 +613,7 @@ fn test_session_containment_profile_policy() {
     for name in ["local", "cloud", "strict", "interactive"] {
         let profile = ContainmentProfile::parse(name).unwrap();
         let policy = Policy::from_name(profile.policy_name());
-        assert!(
-            policy.is_some(),
-            "profile {name} should resolve to policy {:?}",
-            profile.policy_name()
-        );
+        assert!(policy.is_some(), "profile {name} should resolve to policy {:?}", profile.policy_name());
         let p = policy.unwrap();
         assert_eq!(p.name.as_deref(), Some(profile.policy_name()));
     }
@@ -752,8 +692,7 @@ fn test_session_run_contained_local() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -787,6 +726,8 @@ fn test_session_run_contained_strict() {
             ..ContainmentProfile::Strict.budget()
         },
         containment: Some("strict".into()),
+        // Host: agent script in host tempdir. See budget-enforce comment.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -816,13 +757,9 @@ s.close()
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -855,10 +792,7 @@ fn test_session_contained_and_policy_conflict() {
     // when both --contained and --policy are set, it's an error.
     let contained: Option<String> = Some("local".into());
     let policy: Option<std::path::PathBuf> = Some(std::path::PathBuf::from("safe"));
-    assert!(
-        contained.is_some() && policy.is_some(),
-        "both set means CLI should reject"
-    );
+    assert!(contained.is_some() && policy.is_some(), "both set means CLI should reject");
 }
 
 // ── Test 24: Budget override with containment (including sentinel-value scenario) ──
@@ -928,8 +862,7 @@ fn test_session_llm_provider_metadata() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -943,20 +876,10 @@ fn test_session_llm_provider_metadata() {
 
     // Verify manifest contains agent section.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
-    assert!(
-        manifest_content.contains("[session.agent]"),
-        "manifest should contain [session.agent] section"
-    );
-    assert!(
-        manifest_content.contains("containment = \"cloud\""),
-        "manifest should contain containment field"
-    );
-    assert!(
-        manifest_content.contains("llm_provider = \"anthropic\""),
-        "manifest should contain llm_provider field"
-    );
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    assert!(manifest_content.contains("[session.agent]"), "manifest should contain [session.agent] section");
+    assert!(manifest_content.contains("containment = \"cloud\""), "manifest should contain containment field");
+    assert!(manifest_content.contains("llm_provider = \"anthropic\""), "manifest should contain llm_provider field");
 }
 
 // ── Test 26: Cloud profile has expected specific limits ──
@@ -1028,11 +951,7 @@ fn test_session_budget_zero_rejected() {
         assert!(b.max_tool_time_s > 0);
         assert!(b.max_output_bytes > 0);
         // Tool time must not exceed wall time in any profile.
-        assert!(
-            b.max_tool_time_s <= b.max_wall_time_s,
-            "profile {name}: tool time ({}) must not exceed wall time ({})",
-            b.max_tool_time_s, b.max_wall_time_s
-        );
+        assert!(b.max_tool_time_s <= b.max_wall_time_s, "profile {name}: tool time ({}) must not exceed wall time ({})", b.max_tool_time_s, b.max_wall_time_s);
     }
 }
 
@@ -1055,10 +974,7 @@ fn test_session_tool_filter() {
     assert!(f.is_allowed("/usr/bin/python3"));
 
     // Allow-only: only matching commands pass.
-    let f = ToolFilter {
-        allow: vec!["echo".into(), "ls".into()],
-        deny: vec![],
-    };
+    let f = ToolFilter { allow: vec!["echo".into(), "ls".into()], deny: vec![] };
     assert!(f.is_allowed("echo"));
     assert!(f.is_allowed("ls"));
     assert!(!f.is_allowed("rm"));
@@ -1074,10 +990,7 @@ fn test_session_tool_filter() {
     assert!(!f.is_allowed("dd"));
 
     // Glob patterns.
-    let f = ToolFilter {
-        allow: vec!["python*".into()],
-        deny: vec![],
-    };
+    let f = ToolFilter { allow: vec!["python*".into()], deny: vec![] };
     assert!(f.is_allowed("python3"));
     assert!(f.is_allowed("python3.11"));
     assert!(!f.is_allowed("ruby"));
@@ -1085,10 +998,7 @@ fn test_session_tool_filter() {
     assert!(f.is_allowed("/usr/bin/python3"));
 
     // Deny glob.
-    let f = ToolFilter {
-        allow: vec![],
-        deny: vec!["*.sh".into()],
-    };
+    let f = ToolFilter { allow: vec![], deny: vec!["*.sh".into()] };
     assert!(f.is_allowed("echo"));
     assert!(!f.is_allowed("exploit.sh"));
 }
@@ -1105,10 +1015,7 @@ fn test_session_new_event_kinds_serde() {
             new_limit: 100,
             old_limit: 50,
         },
-        SessionEventKind::HeartbeatTimeout {
-            elapsed_s: 120,
-            interval_s: 60,
-        },
+        SessionEventKind::HeartbeatTimeout { elapsed_s: 120, interval_s: 60 },
         SessionEventKind::ResourceSnapshot {
             elapsed_s: 30,
             tool_calls_used: 5,
@@ -1120,10 +1027,7 @@ fn test_session_new_event_kinds_serde() {
             command: vec!["rm".into(), "-rf".into()],
             reason: "denied by filter".into(),
         },
-        SessionEventKind::AgentOutput {
-            channel: "stdout".into(),
-            text: "hello world".into(),
-        },
+        SessionEventKind::AgentOutput { channel: "stdout".into(), text: "hello world".into() },
         SessionEventKind::ApprovalRequired {
             call_id: "call-2".into(),
             command: vec!["echo".into()],
@@ -1172,15 +1076,7 @@ fn test_session_budget_extension_request_serde() {
 fn test_session_wire_message_serde() {
     use oaie_core::session::WireMessage;
 
-    let msgs = vec![
-        WireMessage::AgentOutput {
-            channel: "stderr".into(),
-            text: "warning: foo".into(),
-        },
-        WireMessage::UserInput {
-            text: "continue\n".into(),
-        },
-    ];
+    let msgs = vec![WireMessage::AgentOutput { channel: "stderr".into(), text: "warning: foo".into() }, WireMessage::UserInput { text: "continue\n".into() }];
 
     for msg in &msgs {
         let json = serde_json::to_string(msg).unwrap();
@@ -1199,7 +1095,8 @@ fn test_session_config_defaults() {
     assert!(config.tool_filter.is_none());
     assert!(config.deny_network_tools.is_empty());
     assert_eq!(config.max_agent_output_bytes, 0);
-    assert_eq!(config.agent_sandbox, oaie_core::session::AgentSandboxMode::Host);
+    // Pins the safe default — the unsafe mode must be an explicit opt-in.
+    assert_eq!(config.agent_sandbox, oaie_core::session::AgentSandboxMode::Sandboxed);
     assert!(!config.approval.tool_call);
 
     // Roundtrip through serde.
@@ -1222,8 +1119,7 @@ fn test_session_event_log_read_all() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let result = session.run(&command, true).unwrap();
@@ -1231,16 +1127,10 @@ fn test_session_event_log_read_all() {
 
     // Read session manifest to get event_log_hash.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
     let manifest: toml::Value = manifest_content.parse().unwrap();
 
-    let event_log_hash_str = manifest
-        .get("session")
-        .and_then(|s| s.get("trace"))
-        .and_then(|t| t.get("event_log_hash"))
-        .and_then(|v| v.as_str())
-        .unwrap();
+    let event_log_hash_str = manifest.get("session").and_then(|s| s.get("trace")).and_then(|t| t.get("event_log_hash")).and_then(|v| v.as_str()).unwrap();
 
     // Parse "algo:hex" format.
     let hex = event_log_hash_str.split(':').nth(1).unwrap();
@@ -1250,10 +1140,7 @@ fn test_session_event_log_read_all() {
     let hash = oaie_core::artifact::Hash::from_hex(hex).unwrap();
     let blob_path = cas.blob_path(&hash);
     let ndjson = std::fs::read_to_string(&blob_path).unwrap();
-    let events: Vec<SessionEvent> = ndjson
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let events: Vec<SessionEvent> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
 
     // Session with /bin/true: SessionStart + SessionStop = 2 events.
     assert_eq!(events.len(), 2, "expected SessionStart + SessionStop");
@@ -1280,10 +1167,9 @@ fn test_session_event_log_filter_by_type() {
     let policy = default_resolved_policy(Some(Duration::from_secs(30)));
     let config = SessionConfig {
         name: Some("filter-log-test".into()),
-        budget: SessionBudget {
-            max_tool_calls: 2,
-            ..SessionBudget::default()
-        },
+        budget: SessionBudget { max_tool_calls: 2, ..SessionBudget::default() },
+        // Host: agent script in host tempdir. See budget-enforce comment.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -1309,59 +1195,37 @@ s.close()
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
     let result = session.run(&command, true).unwrap();
     assert_eq!(result.tool_calls, 2);
 
     // Read event log from CAS.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
     let manifest: toml::Value = manifest_content.parse().unwrap();
-    let event_log_hash_str = manifest
-        .get("session")
-        .and_then(|s| s.get("trace"))
-        .and_then(|t| t.get("event_log_hash"))
-        .and_then(|v| v.as_str())
-        .unwrap();
+    let event_log_hash_str = manifest.get("session").and_then(|s| s.get("trace")).and_then(|t| t.get("event_log_hash")).and_then(|v| v.as_str()).unwrap();
     let hex = event_log_hash_str.split(':').nth(1).unwrap();
     let cas = oaie_cas::store::CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
     let hash = oaie_core::artifact::Hash::from_hex(hex).unwrap();
     let blob_path = cas.blob_path(&hash);
     let ndjson = std::fs::read_to_string(&blob_path).unwrap();
-    let events: Vec<SessionEvent> = ndjson
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let events: Vec<SessionEvent> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
 
     // Filter for tool_call events (ToolDispatch + ToolResult).
-    let tool_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e.kind, SessionEventKind::ToolDispatch { .. } | SessionEventKind::ToolResult { .. }))
-        .collect();
+    let tool_events: Vec<_> = events.iter().filter(|e| matches!(e.kind, SessionEventKind::ToolDispatch { .. } | SessionEventKind::ToolResult { .. })).collect();
     assert_eq!(tool_events.len(), 4, "expected 2 ToolDispatch + 2 ToolResult");
 
     // Filter for budget events.
-    let budget_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e.kind, SessionEventKind::BudgetWarning { .. } | SessionEventKind::BudgetExhausted { .. }))
-        .collect();
+    let budget_events: Vec<_> = events.iter().filter(|e| matches!(e.kind, SessionEventKind::BudgetWarning { .. } | SessionEventKind::BudgetExhausted { .. })).collect();
     // With only 2 calls and budget of 2, may or may not have BudgetExhausted.
     // At minimum we expect 0 warnings (80% of 2 = 1.6, so at call 2 we'd get a warning).
     assert!(budget_events.len() <= 2, "at most 2 budget events");
 
     // Filter for io events (SessionStart, SessionStop).
-    let io_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e.kind, SessionEventKind::SessionStart { .. } | SessionEventKind::SessionStop { .. }))
-        .collect();
+    let io_events: Vec<_> = events.iter().filter(|e| matches!(e.kind, SessionEventKind::SessionStart { .. } | SessionEventKind::SessionStop { .. })).collect();
     assert_eq!(io_events.len(), 2, "expected SessionStart + SessionStop");
 }
 
@@ -1387,6 +1251,8 @@ fn test_session_budget_extension_applies() {
             max_wall_time_s: 60,
             ..SessionBudget::default()
         },
+        // Host: agent script in host tempdir. See budget-enforce comment.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -1441,13 +1307,9 @@ s.close()
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
     let result = session.run(&command, true).unwrap();
 
@@ -1457,35 +1319,22 @@ s.close()
     // Verify DB budget was updated.
     let db = OaieDb::open(&store.db_path).unwrap();
     let record = db.get_session(&session_id).unwrap().unwrap();
-    let budget: SessionBudget =
-        serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
+    let budget: SessionBudget = serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
     assert_eq!(budget.max_tool_calls, 7, "budget should be 2 + 5 = 7");
 
     // Verify BudgetExtension event in log.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
     let manifest: toml::Value = manifest_content.parse().unwrap();
-    let event_log_hash_str = manifest
-        .get("session")
-        .and_then(|s| s.get("trace"))
-        .and_then(|t| t.get("event_log_hash"))
-        .and_then(|v| v.as_str())
-        .unwrap();
+    let event_log_hash_str = manifest.get("session").and_then(|s| s.get("trace")).and_then(|t| t.get("event_log_hash")).and_then(|v| v.as_str()).unwrap();
     let hex = event_log_hash_str.split(':').nth(1).unwrap();
     let cas = oaie_cas::store::CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
     let hash = oaie_core::artifact::Hash::from_hex(hex).unwrap();
     let blob_path = cas.blob_path(&hash);
     let ndjson = std::fs::read_to_string(&blob_path).unwrap();
-    let events: Vec<SessionEvent> = ndjson
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let events: Vec<SessionEvent> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
 
-    let ext_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e.kind, SessionEventKind::BudgetExtension { .. }))
-        .collect();
+    let ext_events: Vec<_> = events.iter().filter(|e| matches!(e.kind, SessionEventKind::BudgetExtension { .. })).collect();
     assert!(!ext_events.is_empty(), "should have BudgetExtension event");
 }
 
@@ -1502,19 +1351,14 @@ fn test_session_verify_basic() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
     let result = session.run(&command, true).unwrap();
     assert!(result.manifest_hash.is_some());
 
     // Verify the session.
     let report = verify_session(&store, &session_id).unwrap();
-    assert!(
-        report.passed(),
-        "session verification should pass: {}",
-        report.summary()
-    );
+    assert!(report.passed(), "session verification should pass: {}", report.summary());
 
     // Check individual checks.
     let manifest_exists = report.checks.iter().find(|c| c.check == CheckKind::SessionManifestExists).unwrap();
@@ -1546,10 +1390,9 @@ fn test_session_verify_with_runs() {
     let policy = default_resolved_policy(Some(Duration::from_secs(30)));
     let config = SessionConfig {
         name: Some("verify-runs-test".into()),
-        budget: SessionBudget {
-            max_tool_calls: 3,
-            ..SessionBudget::default()
-        },
+        budget: SessionBudget { max_tool_calls: 3, ..SessionBudget::default() },
+        // Host: agent script in host tempdir. See budget-enforce comment.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -1575,24 +1418,16 @@ s.close()
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
     let result = session.run(&command, true).unwrap();
     assert_eq!(result.tool_calls, 2);
 
     // Verify the session (including nested runs).
     let report = verify_session(&store, &session_id).unwrap();
-    assert!(
-        report.passed(),
-        "session verification should pass: {}",
-        report.summary()
-    );
+    assert!(report.passed(), "session verification should pass: {}", report.summary());
 
     // Nested run verification should have 2 reports.
     assert_eq!(report.run_reports.len(), 2, "should have 2 nested run reports");
@@ -1616,23 +1451,16 @@ fn test_session_verify_tampered_event() {
     };
     let command = vec!["/bin/true".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
     let result = session.run(&command, true).unwrap();
     assert!(result.manifest_hash.is_some());
 
     // Read the event log hash from manifest, then tamper with the blob.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
     let manifest: toml::Value = manifest_content.parse().unwrap();
-    let event_log_hash_str = manifest
-        .get("session")
-        .and_then(|s| s.get("trace"))
-        .and_then(|t| t.get("event_log_hash"))
-        .and_then(|v| v.as_str())
-        .unwrap();
+    let event_log_hash_str = manifest.get("session").and_then(|s| s.get("trace")).and_then(|t| t.get("event_log_hash")).and_then(|v| v.as_str()).unwrap();
     let hex = event_log_hash_str.split(':').nth(1).unwrap();
     let cas = oaie_cas::store::CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
     let hash = oaie_core::artifact::Hash::from_hex(hex).unwrap();
@@ -1651,10 +1479,7 @@ fn test_session_verify_tampered_event() {
 
     // Verification should fail: event log hash mismatch.
     let report = verify_session(&store, &session_id).unwrap();
-    assert!(
-        !report.passed(),
-        "session verification should fail with tampered event log"
-    );
+    assert!(!report.passed(), "session verification should fail with tampered event log");
     let hash_check = report.checks.iter().find(|c| c.check == CheckKind::SessionEventLogHash).unwrap();
     assert_eq!(hash_check.status, CheckStatus::Fail);
 }
@@ -1687,8 +1512,7 @@ fn test_session_heartbeat_timeout() {
     // Agent that sleeps without dispatching anything.
     let command = vec!["/bin/sleep".to_string(), "30".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
 
     let start = std::time::Instant::now();
@@ -1697,37 +1521,21 @@ fn test_session_heartbeat_timeout() {
 
     // Session should stop due to heartbeat timeout, not wall time.
     assert_eq!(result.state, SessionState::Stopped);
-    assert!(
-        elapsed.as_secs() < 10,
-        "heartbeat should trigger within a few seconds, took {}s",
-        elapsed.as_secs()
-    );
+    assert!(elapsed.as_secs() < 10, "heartbeat should trigger within a few seconds, took {}s", elapsed.as_secs());
 
     // Verify HeartbeatTimeout event in log.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
     let manifest: toml::Value = manifest_content.parse().unwrap();
-    let event_log_hash_str = manifest
-        .get("session")
-        .and_then(|s| s.get("trace"))
-        .and_then(|t| t.get("event_log_hash"))
-        .and_then(|v| v.as_str())
-        .unwrap();
+    let event_log_hash_str = manifest.get("session").and_then(|s| s.get("trace")).and_then(|t| t.get("event_log_hash")).and_then(|v| v.as_str()).unwrap();
     let hex = event_log_hash_str.split(':').nth(1).unwrap();
     let cas = oaie_cas::store::CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
     let hash = oaie_core::artifact::Hash::from_hex(hex).unwrap();
     let blob_path = cas.blob_path(&hash);
     let ndjson = std::fs::read_to_string(&blob_path).unwrap();
-    let events: Vec<SessionEvent> = ndjson
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let events: Vec<SessionEvent> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
 
-    let heartbeat_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e.kind, SessionEventKind::HeartbeatTimeout { .. }))
-        .collect();
+    let heartbeat_events: Vec<_> = events.iter().filter(|e| matches!(e.kind, SessionEventKind::HeartbeatTimeout { .. })).collect();
     assert!(!heartbeat_events.is_empty(), "should have HeartbeatTimeout event");
 }
 
@@ -1748,11 +1556,10 @@ fn test_session_heartbeat_reset_on_activity() {
     let policy = default_resolved_policy(Some(Duration::from_secs(30)));
     let config = SessionConfig {
         name: Some("heartbeat-active-test".into()),
-        budget: SessionBudget {
-            max_tool_calls: 3,
-            ..SessionBudget::default()
-        },
+        budget: SessionBudget { max_tool_calls: 3, ..SessionBudget::default() },
         heartbeat_interval_s: 3, // 3 second heartbeat
+        // Host: agent script in host tempdir. See budget-enforce comment.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -1781,13 +1588,9 @@ s.close()
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let result = session.run(&command, true).unwrap();
 
     // All 3 calls should succeed — heartbeat is reset on each activity.
@@ -1812,14 +1615,10 @@ fn test_session_tool_filter_enforcement() {
     let policy = default_resolved_policy(Some(Duration::from_secs(30)));
     let config = SessionConfig {
         name: Some("filter-test".into()),
-        budget: SessionBudget {
-            max_tool_calls: 10,
-            ..SessionBudget::default()
-        },
-        tool_filter: Some(oaie_core::session::ToolFilter {
-            allow: vec!["echo".into()],
-            deny: vec![],
-        }),
+        budget: SessionBudget { max_tool_calls: 10, ..SessionBudget::default() },
+        tool_filter: Some(oaie_core::session::ToolFilter { allow: vec!["echo".into()], deny: vec![] }),
+        // Host: agent script in host tempdir. See budget-enforce comment.
+        agent_sandbox: AgentSandboxMode::Host,
         ..SessionConfig::default()
     };
 
@@ -1866,13 +1665,9 @@ assert "denied" in results[1]["error"].lower(), f"error should mention denied: {
     )
     .unwrap();
 
-    let command = vec![
-        "/usr/bin/python3".to_string(),
-        agent_script.to_string_lossy().into_owned(),
-    ];
+    let command = vec!["/usr/bin/python3".to_string(), agent_script.to_string_lossy().into_owned()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let session_id = session.session_id().to_string();
     let result = session.run(&command, true).unwrap();
 
@@ -1881,29 +1676,17 @@ assert "denied" in results[1]["error"].lower(), f"error should mention denied: {
 
     // Verify ToolDenied event in log.
     let session_dir = store.root.join("sessions").join(&session_id);
-    let manifest_content =
-        std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
+    let manifest_content = std::fs::read_to_string(session_dir.join("session_manifest.toml")).unwrap();
     let manifest: toml::Value = manifest_content.parse().unwrap();
-    let event_log_hash_str = manifest
-        .get("session")
-        .and_then(|s| s.get("trace"))
-        .and_then(|t| t.get("event_log_hash"))
-        .and_then(|v| v.as_str())
-        .unwrap();
+    let event_log_hash_str = manifest.get("session").and_then(|s| s.get("trace")).and_then(|t| t.get("event_log_hash")).and_then(|v| v.as_str()).unwrap();
     let hex = event_log_hash_str.split(':').nth(1).unwrap();
     let cas = oaie_cas::store::CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
     let hash = oaie_core::artifact::Hash::from_hex(hex).unwrap();
     let blob_path = cas.blob_path(&hash);
     let ndjson = std::fs::read_to_string(&blob_path).unwrap();
-    let events: Vec<SessionEvent> = ndjson
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
+    let events: Vec<SessionEvent> = ndjson.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
 
-    let denied_events: Vec<_> = events
-        .iter()
-        .filter(|e| matches!(e.kind, SessionEventKind::ToolDenied { .. }))
-        .collect();
+    let denied_events: Vec<_> = events.iter().filter(|e| matches!(e.kind, SessionEventKind::ToolDenied { .. })).collect();
     assert_eq!(denied_events.len(), 1, "should have 1 ToolDenied event");
 }
 
@@ -1940,16 +1723,11 @@ fn test_session_db_update_budget() {
         max_output_bytes: 5_000_000_000,
         ..SessionBudget::default()
     };
-    db.update_session_budget(
-        &session_id,
-        &serde_json::to_string(&new_budget).unwrap(),
-    )
-    .unwrap();
+    db.update_session_budget(&session_id, &serde_json::to_string(&new_budget).unwrap()).unwrap();
 
     // Verify.
     let record = db.get_session(&session_id).unwrap().unwrap();
-    let parsed: SessionBudget =
-        serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
+    let parsed: SessionBudget = serde_json::from_str(record.budget_json.as_deref().unwrap()).unwrap();
     assert_eq!(parsed.max_tool_calls, 200);
     assert_eq!(parsed.max_wall_time_s, 7200);
     assert_eq!(parsed.max_output_bytes, 5_000_000_000);
@@ -1977,10 +1755,7 @@ fn test_session_nftables_counter_parsing() {
     }];
 
     let script = generate_nft_script(&rules);
-    assert!(
-        script.contains("counter accept"),
-        "nft rules should include counter keyword for byte tracking"
-    );
+    assert!(script.contains("counter accept"), "nft rules should include counter keyword for byte tracking");
 }
 
 // ── Test 46: max_network_bytes field in budget (N.1) ──
@@ -2006,7 +1781,7 @@ fn test_session_budget_network_bytes_field() {
     assert_eq!(parsed.max_network_bytes, 0, "missing field should default to 0");
 }
 
-// ── Test 47: Agent output budget enforcement (N.4) ──
+// ── Test 47: Agent output budget enforcement ──
 
 #[test]
 fn test_session_agent_output_budget() {
@@ -2020,14 +1795,9 @@ fn test_session_agent_output_budget() {
     };
 
     // Agent that outputs a lot of text to stdout.
-    let command = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "for i in $(seq 1 1000); do echo 'this is a long line of text that will exceed the output budget'; done; sleep 5".to_string(),
-    ];
+    let command = vec!["/bin/sh".to_string(), "-c".to_string(), "for i in $(seq 1 1000); do echo 'this is a long line of text that will exceed the output budget'; done; sleep 5".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
 
     let start = std::time::Instant::now();
     let result = session.run(&command, false).unwrap();
@@ -2035,14 +1805,10 @@ fn test_session_agent_output_budget() {
 
     // Session should stop due to agent output budget, not wall time.
     assert_eq!(result.state, SessionState::BudgetExhausted);
-    assert!(
-        elapsed.as_secs() < 10,
-        "agent output budget should stop session quickly, took {}s",
-        elapsed.as_secs()
-    );
+    assert!(elapsed.as_secs() < 10, "agent output budget should stop session quickly, took {}s", elapsed.as_secs());
 }
 
-// ── Test 48: Agent output unlimited when budget is 0 (N.4) ──
+// ── Test 48: Agent output unlimited when budget is 0 ──
 
 #[test]
 fn test_session_agent_output_unlimited() {
@@ -2055,14 +1821,9 @@ fn test_session_agent_output_unlimited() {
         ..SessionConfig::default()
     };
     // Agent outputs text, but unlimited output means it runs to completion.
-    let command = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "echo 'hello world'; echo 'more output'".to_string(),
-    ];
+    let command = vec!["/bin/sh".to_string(), "-c".to_string(), "echo 'hello world'; echo 'more output'".to_string()];
 
-    let session =
-        SessionRunner::create(store.clone(), policy, config, &command).unwrap();
+    let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let result = session.run(&command, true).unwrap();
 
     // Should complete normally.
@@ -2078,24 +1839,12 @@ fn test_containment_agent_network_mode() {
     use oaie_core::policy::NetworkMode;
 
     // Cloud and interactive profiles need network for LLM API calls.
-    assert_eq!(
-        ContainmentProfile::Cloud.agent_network_mode(),
-        NetworkMode::On
-    );
-    assert_eq!(
-        ContainmentProfile::Interactive.agent_network_mode(),
-        NetworkMode::On
-    );
+    assert_eq!(ContainmentProfile::Cloud.agent_network_mode(), NetworkMode::On);
+    assert_eq!(ContainmentProfile::Interactive.agent_network_mode(), NetworkMode::On);
 
     // Local and strict profiles deny agent network.
-    assert_eq!(
-        ContainmentProfile::Local.agent_network_mode(),
-        NetworkMode::Off
-    );
-    assert_eq!(
-        ContainmentProfile::Strict.agent_network_mode(),
-        NetworkMode::Off
-    );
+    assert_eq!(ContainmentProfile::Local.agent_network_mode(), NetworkMode::Off);
+    assert_eq!(ContainmentProfile::Strict.agent_network_mode(), NetworkMode::Off);
 }
 
 // ── Test 50: agent_network_for_provider narrowing (O.5) ──
@@ -2137,23 +1886,27 @@ fn test_agent_network_for_provider() {
     }
 
     // Local provider → Off.
-    assert_eq!(
-        agent_network_for_provider("local").unwrap(),
-        NetworkMode::Off
-    );
+    assert_eq!(agent_network_for_provider("local").unwrap(), NetworkMode::Off);
 
     // Custom/unknown → None (use profile default).
     assert!(agent_network_for_provider("custom").is_none());
     assert!(agent_network_for_provider("unknown").is_none());
 }
 
-// ── Test 51: AgentSandboxMode serde (O.1) ──
+// ── Test 51: AgentSandboxMode serde ──
 
 #[test]
 fn test_agent_sandbox_mode_serde() {
-    // Default is Host.
+    // Default must be Sandboxed: the unsafe Host mode runs the agent at
+    // supervisor UID, and any code path that builds SessionConfig via
+    // `..Default::default()` would silently inherit it.
     let mode = AgentSandboxMode::default();
-    assert_eq!(mode, AgentSandboxMode::Host);
+    assert_eq!(
+        mode,
+        AgentSandboxMode::Sandboxed,
+        "AgentSandboxMode::default() MUST be Sandboxed — Host was the \
+         CWE-1188 insecure-default that ran AI agents at supervisor UID"
+    );
 
     // Roundtrip through JSON.
     let sandboxed = AgentSandboxMode::Sandboxed;
@@ -2167,32 +1920,70 @@ fn test_agent_sandbox_mode_serde() {
     assert_eq!(json, "\"host\"");
 }
 
-// ── Test 52: SessionConfig with agent sandbox fields (O.1) ──
+#[test]
+fn test_session_config_rejects_typo_field() {
+    // deny_unknown_fields: a misspelled agent_sandbox key fails at parse
+    // instead of silently falling through to default. The default IS
+    // safe now (Sandboxed), so this is operator-feedback hygiene rather
+    // than a security gate — but the operator who typed
+    // `agent_sandbox_mode = "host"` to deliberately opt out of
+    // sandboxing should learn that their config didn't take.
+    // Start from a known-good serialized default, then inject the typo.
+    // This decouples the test from which SessionConfig (and nested
+    // SessionBudget) fields happen to be required-vs-default — we only
+    // care that the EXTRA field is rejected.
+    let good = SessionConfig::default();
+    let mut good_json: serde_json::Value = serde_json::to_value(&good).unwrap();
+
+    // Inject a typo'd version of agent_sandbox.
+    good_json.as_object_mut().unwrap().insert("agent_sandbox_mode".into(), serde_json::json!("host"));
+
+    let result: Result<SessionConfig, _> = serde_json::from_value(good_json.clone());
+    assert!(
+        result.is_err(),
+        "SessionConfig should reject unknown fields (deny_unknown_fields), \
+         but parsed: {:?}",
+        result.ok()
+    );
+    // The error should name the typo, so the operator can fix it.
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("agent_sandbox_mode") || err_msg.contains("unknown field"), "error should name the typo'd field: {err_msg}");
+
+    // The correct spelling parses (and overrides the default).
+    good_json.as_object_mut().unwrap().remove("agent_sandbox_mode");
+    good_json.as_object_mut().unwrap().insert("agent_sandbox".into(), serde_json::json!("host"));
+    let parsed: SessionConfig = serde_json::from_value(good_json).unwrap();
+    assert_eq!(parsed.agent_sandbox, AgentSandboxMode::Host);
+}
+
+// ── Test 52: SessionConfig with agent sandbox fields ──
 
 #[test]
 fn test_session_config_agent_sandbox_fields() {
-    // Default config has host mode and no approval.
+    // Default config: SANDBOXED mode (safe default), no approval.
     let config = SessionConfig::default();
-    assert_eq!(config.agent_sandbox, AgentSandboxMode::Host);
+    assert_eq!(config.agent_sandbox, AgentSandboxMode::Sandboxed);
     assert!(!config.approval.tool_call);
 
-    // Build config with sandboxed agent and approval.
+    // Code that builds SessionConfig via `..SessionConfig::default()` —
+    // like the next block does — must land on the safe variant; Host
+    // mode requires an explicit opt-out.
     let config = SessionConfig {
-        agent_sandbox: AgentSandboxMode::Sandboxed,
+        agent_sandbox: AgentSandboxMode::Host, // Explicit opt-out.
         approval: ApprovalPolicy { tool_call: true },
         ..SessionConfig::default()
     };
-    assert_eq!(config.agent_sandbox, AgentSandboxMode::Sandboxed);
+    assert_eq!(config.agent_sandbox, AgentSandboxMode::Host);
     assert!(config.approval.tool_call);
 
     // Verify serde roundtrip preserves all fields.
     let json = serde_json::to_string(&config).unwrap();
     let parsed: SessionConfig = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed.agent_sandbox, AgentSandboxMode::Sandboxed);
+    assert_eq!(parsed.agent_sandbox, AgentSandboxMode::Host);
     assert!(parsed.approval.tool_call);
 }
 
-// ── Test 53: Sandboxed agent session (O.1) — requires userns ──
+// ── Test 53: Sandboxed agent session — requires userns ──
 
 #[test]
 fn test_session_sandboxed_agent() {
@@ -2235,22 +2026,13 @@ while b'\n' not in resp:
 s.close()
 "#;
 
-    let command = vec![
-        "python3".to_string(),
-        "-c".to_string(),
-        agent_script.to_string(),
-    ];
+    let command = vec!["python3".to_string(), "-c".to_string(), agent_script.to_string()];
 
     let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let result = session.run(&command, true).unwrap();
 
     // Session should complete (agent exits after one tool call).
-    assert!(
-        result.state == SessionState::Stopped
-            || result.state == SessionState::BudgetExhausted,
-        "unexpected state: {:?}",
-        result.state,
-    );
+    assert!(result.state == SessionState::Stopped || result.state == SessionState::BudgetExhausted, "unexpected state: {:?}", result.state,);
     assert!(result.tool_calls >= 1, "expected at least 1 tool call");
 }
 
@@ -2273,11 +2055,7 @@ fn test_approval_policy_event_serde() {
     let json = serde_json::to_string(&event).unwrap();
     let parsed: SessionEvent = serde_json::from_str(&json).unwrap();
     match &parsed.kind {
-        SessionEventKind::ApprovalRequired {
-            call_id,
-            command,
-            approved,
-        } => {
+        SessionEventKind::ApprovalRequired { call_id, command, approved } => {
             assert_eq!(call_id, "c1");
             assert_eq!(command, &["rm", "-rf", "/"]);
             assert!(!approved);
@@ -2305,11 +2083,7 @@ fn test_session_attach_rejects_stopped() {
         },
         ..SessionConfig::default()
     };
-    let command = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        "exit 0".to_string(),
-    ];
+    let command = vec!["/bin/sh".to_string(), "-c".to_string(), "exit 0".to_string()];
 
     let session = SessionRunner::create(store.clone(), policy, config, &command).unwrap();
     let sid = session.session_id().to_string();

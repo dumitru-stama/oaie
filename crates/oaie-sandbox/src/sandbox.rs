@@ -32,29 +32,42 @@ pub const ENV_BLOCKED_PREFIXES: &[&str] = &["LD_", "GIT_"];
 /// These are variables that can inject code, override library paths, or
 /// manipulate runtime behavior in ways that could compromise sandbox isolation.
 pub const ENV_BLOCKED_KEYS: &[&str] = &[
-    "GCONV_PATH", "TMPDIR", "BASH_ENV", "ENV", "IFS", "CDPATH",
-    "HOSTALIASES", "LOCALDOMAIN", "RESOLV_HOST_CONF",
-    "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
-    "RUBYLIB", "RUBYOPT", "PERL5LIB", "PERL5OPT", "PERLLIB",
-    "CLASSPATH", "NODE_OPTIONS",
-    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
-    "MAVEN_OPTS", "GRADLE_OPTS",
-    "GLIBC_TUNABLES", "DOTNET_STARTUP_HOOKS",
-    "OPENSSL_CONF", "OPENSSL_ENGINES",
+    "GCONV_PATH",
+    "TMPDIR",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "CDPATH",
+    "HOSTALIASES",
+    "LOCALDOMAIN",
+    "RESOLV_HOST_CONF",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "RUBYLIB",
+    "RUBYOPT",
+    "PERL5LIB",
+    "PERL5OPT",
+    "PERLLIB",
+    "CLASSPATH",
+    "NODE_OPTIONS",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "JDK_JAVA_OPTIONS",
+    "MAVEN_OPTS",
+    "GRADLE_OPTS",
+    "GLIBC_TUNABLES",
+    "DOTNET_STARTUP_HOOKS",
+    "OPENSSL_CONF",
+    "OPENSSL_ENGINES",
 ];
 
 /// Base environment variables always set inside the sandbox.
-pub const BASE_ENV: &[(&str, &str)] = &[
-    ("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"),
-    ("HOME", "/root"),
-    ("TERM", "dumb"),
-    ("LANG", "C.UTF-8"),
-];
+pub const BASE_ENV: &[(&str, &str)] = &[("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"), ("HOME", "/root"), ("TERM", "dumb"), ("LANG", "C.UTF-8")];
 
 /// Check whether an env var key is blocked by prefix or name.
 fn is_env_blocked(key: &str) -> bool {
-    ENV_BLOCKED_PREFIXES.iter().any(|p| key.starts_with(p))
-        || ENV_BLOCKED_KEYS.contains(&key)
+    ENV_BLOCKED_PREFIXES.iter().any(|p| key.starts_with(p)) || ENV_BLOCKED_KEYS.contains(&key)
 }
 
 /// A named bind mount for session mode (dispatch socket, artifacts directory).
@@ -66,6 +79,14 @@ pub struct SessionMount {
     pub target: String,
     /// If true, the mount is read-write; otherwise read-only.
     pub writable: bool,
+    /// Drop MS_NOEXEC so binaries under this mount can be executed.
+    /// Forces read-only regardless of `writable` — an exec+rw mount would let
+    /// the sandboxed process write a payload and run it, which is exactly the
+    /// barrier NOEXEC exists to provide on kernels without Landlock. The
+    /// narrow use case is a pre-built executor binary that lives outside the
+    /// system /usr tree; data mounts (artifacts, scratch, caches) have no
+    /// business being executable and should leave this false.
+    pub exec: bool,
 }
 
 /// Configuration for a sandboxed execution.
@@ -90,6 +111,11 @@ pub struct SandboxConfig {
     pub max_memory: Option<u64>,
     /// Override RLIMIT_FSIZE in bytes. None → use default (1G).
     pub max_fsize: Option<u64>,
+    /// Override RLIMIT_NOFILE soft limit. None → use default (1024).
+    /// Hard limit is 4× soft. Workloads with large mmap'd classpaths
+    /// (JVM) or deep Python dependency trees can blow past 1024 just on
+    /// startup; allow policies to raise it.
+    pub max_files: Option<u64>,
     /// Allow `memfd_create()` and `execveat()` syscalls through the seccomp filter.
     /// Needed for JIT compilers and language runtimes (Java, Node.js, .NET).
     pub allow_memfd: bool,
@@ -125,6 +151,7 @@ impl Default for SandboxConfig {
             max_pids: None,
             max_memory: None,
             max_fsize: None,
+            max_files: None,
             allow_memfd: false,
             retain_caps: 0,
             max_cpu_time: None,
@@ -198,13 +225,7 @@ impl Drop for SandboxedChild {
 /// * `post_map_hook` — Optional closure called in the parent after UID/GID maps
 ///   are written but before the child is released from the sync pipe. Used to
 ///   assign the child PID to a cgroup scope before it starts executing.
-pub fn spawn_sandboxed(
-    config: &SandboxConfig,
-    command: &[String],
-    env_vars: &[(String, String)],
-    trace_enabled: bool,
-    post_map_hook: Option<Box<dyn FnOnce(Pid) -> Result<()>>>,
-) -> Result<SandboxedChild> {
+pub fn spawn_sandboxed(config: &SandboxConfig, command: &[String], env_vars: &[(String, String)], trace_enabled: bool, post_map_hook: Option<Box<dyn FnOnce(Pid) -> Result<()>>>) -> Result<SandboxedChild> {
     if command.is_empty() {
         return Err(OaieError::SandboxError("empty command".into()));
     }
@@ -216,12 +237,7 @@ pub fn spawn_sandboxed(
     let (sync_read, sync_write) = pipe_cloexec()?;
 
     // 2. Build clone flags.
-    let mut clone_flags = CloneFlags::CLONE_NEWUSER
-        | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWPID
-        | CloneFlags::CLONE_NEWIPC
-        | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWCGROUP;
+    let mut clone_flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWIPC | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWCGROUP;
 
     if config.network.needs_netns() {
         clone_flags |= CloneFlags::CLONE_NEWNET;
@@ -234,6 +250,16 @@ pub fn spawn_sandboxed(
     let config = config.clone();
     let command = command.to_vec();
     let env_vars = env_vars.to_vec();
+
+    // Pre-generate the root path on the parent side. The child runs after a
+    // raw clone(2) — pthread_atfork handlers do NOT fire — so if the parent
+    // were multi-threaded and another thread held a malloc lock at the moment
+    // of clone, the child's first malloc would deadlock. We can't make the
+    // entire child path async-signal-safe (setup_mounts allocates too), but
+    // moving the unconditional UUID-gen+format! out of the child removes the
+    // first guaranteed alloc. getpid() can't be used for uniqueness here:
+    // it returns 1 inside CLONE_NEWPID, indistinguishable across instances.
+    let root_path = format!("/tmp/oaie-root-{}", uuid::Uuid::now_v7().simple());
 
     let stdout_write_fd = stdout_write.as_raw_fd();
     let stderr_write_fd = stderr_write.as_raw_fd();
@@ -253,10 +279,10 @@ pub fn spawn_sandboxed(
 
         // Block on sync pipe — wait for parent to write UID/GID maps.
         let mut sync_buf = [0u8; 1];
-        let n = unsafe {
-            libc::read(sync_read_fd, sync_buf.as_mut_ptr() as *mut libc::c_void, 1)
-        };
-        unsafe { libc::close(sync_read_fd); }
+        let n = unsafe { libc::read(sync_read_fd, sync_buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        unsafe {
+            libc::close(sync_read_fd);
+        }
 
         if n != 1 {
             write_err(stderr_write_fd, "sync pipe read failed");
@@ -264,10 +290,7 @@ pub fn spawn_sandboxed(
         }
 
         // Set up the mount namespace (new rootfs, /in, /out, etc.).
-        // Use UUID to avoid collisions — getpid() always returns 1 inside
-        // the new PID namespace (CLONE_NEWPID), so it can't distinguish
-        // concurrent sandbox instances.
-        let root_path = format!("/tmp/oaie-root-{}", uuid::Uuid::now_v7().simple());
+        // root_path was pre-generated on the parent side (see above).
         if let Err(e) = mounts::setup_mounts(&config, &root_path) {
             // Best-effort cleanup: detach any partial mounts, then remove the
             // empty directory. umount2 with MNT_DETACH propagates to submounts
@@ -275,17 +298,12 @@ pub fn spawn_sandboxed(
             if let Ok(c_path) = std::ffi::CString::new(root_path.as_bytes()) {
                 let ret = unsafe { libc::umount2(c_path.as_ptr(), libc::MNT_DETACH) };
                 if ret != 0 {
-                    write_err(stderr_write_fd, &format!(
-                        "mount cleanup: umount2 failed: errno {}",
-                        unsafe { *libc::__errno_location() }
-                    ));
+                    write_err(stderr_write_fd, &format!("mount cleanup: umount2 failed: errno {}", unsafe { *libc::__errno_location() }));
                 }
             }
             if let Err(rm_err) = std::fs::remove_dir(&root_path) {
                 // Non-fatal: the directory will be cleaned up at next startup.
-                write_err(stderr_write_fd, &format!(
-                    "mount cleanup: remove_dir failed (will be cleaned at next run): {rm_err}"
-                ));
+                write_err(stderr_write_fd, &format!("mount cleanup: remove_dir failed (will be cleaned at next run): {rm_err}"));
             }
             write_err(stderr_write_fd, &format!("mount setup failed: {e}"));
             return 127;
@@ -315,10 +333,14 @@ pub fn spawn_sandboxed(
                 write_err(stderr_write_fd, "dup2 stdin failed");
                 return 127;
             }
-            unsafe { libc::close(dev_null); }
+            unsafe {
+                libc::close(dev_null);
+            }
         } else {
             // /dev/null unavailable — close stdin as fallback.
-            unsafe { libc::close(0); }
+            unsafe {
+                libc::close(0);
+            }
         }
 
         // dup2 stdout and stderr to our pipe write ends.
@@ -349,8 +371,18 @@ pub fn spawn_sandboxed(
         // namespace + seccomp isolation). Must be after NO_NEW_PRIVS and after
         // pivot_root, before close_range (opens/closes fds internally).
         // Silently skipped on kernels < 5.13 that lack Landlock support.
-        match crate::landlock::apply_landlock(config.extra_ro.len(), config.extra_rw.len()) {
-            Ok(_applied) => {}
+        let session_targets: Vec<(String, bool, bool)> = config.session_mounts.iter().map(|sm| (sm.target.clone(), sm.writable, sm.exec)).collect();
+        match crate::landlock::apply_landlock(config.extra_ro.len(), config.extra_rw.len(), &session_targets) {
+            Ok(true) => {}
+            Ok(false) => {
+                // Kernel lacks Landlock (< 5.13) or it returned ENOSYS. The
+                // manifest's `landlock` field is set from a PARENT-side
+                // probe_landlock() (runner.rs), not from this child-side
+                // result, so surface the discrepancy on stderr — otherwise
+                // the signed manifest can claim landlock=true while this
+                // process never actually applied it.
+                write_err(stderr_write_fd, "landlock: kernel unsupported — NOT applied (manifest may report otherwise)");
+            }
             Err(e) => {
                 // Landlock returning Err (not Ok(false) for unsupported kernel)
                 // means it IS available but application failed — this is abnormal
@@ -380,7 +412,9 @@ pub fn spawn_sandboxed(
                 write_err(2, "ptrace::traceme failed");
                 return 127;
             }
-            unsafe { libc::raise(libc::SIGSTOP); }
+            unsafe {
+                libc::raise(libc::SIGSTOP);
+            }
         }
 
         // Reset personality — disable READ_IMPLIES_EXEC and other dangerous
@@ -404,36 +438,23 @@ pub fn spawn_sandboxed(
             return 127;
         }
 
-        // Install seccomp filter.
-        if let Err(e) = seccomp::install_seccomp_filter(config.allow_memfd) {
+        // Install seccomp filter. in_host_netns tells the builder whether to
+        // block AF_NETLINK — needed when NetworkMode::On skips CLONE_NEWNET
+        let in_host_netns = !config.network.needs_netns();
+        if let Err(e) = seccomp::install_seccomp_filter(config.allow_memfd, in_host_netns) {
             let msg = format!("seccomp install failed: {e}");
             // stderr is already dup2'd, so just write directly.
-            let _ = unsafe {
-                libc::write(
-                    2,
-                    msg.as_ptr() as *const libc::c_void,
-                    msg.len(),
-                )
-            };
+            let _ = unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
             return 127;
         }
 
         // Build clean environment using C string literals (no NUL bytes possible).
-        let mut env: Vec<CString> = BASE_ENV
-            .iter()
-            .map(|(k, v)| CString::new(format!("{k}={v}")).unwrap())
-            .collect();
+        let mut env: Vec<CString> = BASE_ENV.iter().map(|(k, v)| CString::new(format!("{k}={v}")).unwrap()).collect();
         for (key, val) in &env_vars {
             // Reject env var keys that are empty, contain '=' (which would
             // let an attacker override PATH/LD_PRELOAD by embedding a key
             // like "PATH=/evil"), or contain NUL bytes.
-            if key.is_empty()
-                || key.contains('=')
-                || key.contains('\0')
-                || key.contains('\n')
-                || val.contains('\0')
-                || val.contains('\n')
-            {
+            if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains('\n') || val.contains('\0') || val.contains('\n') {
                 write_err(2, "invalid env var: contains forbidden character");
                 return 127;
             }
@@ -447,20 +468,10 @@ pub fn spawn_sandboxed(
         }
 
         // Build argv — NUL bytes in arguments are a programming error.
-        let argv: Vec<CString> = match command
-            .iter()
-            .map(|s| CString::new(s.as_str()))
-            .collect::<std::result::Result<Vec<_>, _>>()
-        {
+        let argv: Vec<CString> = match command.iter().map(|s| CString::new(s.as_str())).collect::<std::result::Result<Vec<_>, _>>() {
             Ok(v) => v,
             Err(_) => {
-                let _ = unsafe {
-                    libc::write(
-                        2,
-                        b"command contains NUL byte\n".as_ptr() as *const libc::c_void,
-                        26,
-                    )
-                };
+                let _ = unsafe { libc::write(2, b"command contains NUL byte\n".as_ptr() as *const libc::c_void, 26) };
                 return 127;
             }
         };
@@ -470,17 +481,9 @@ pub fn spawn_sandboxed(
         }
 
         // execvpe: search PATH for the command.
-        let argv_ptrs: Vec<*const libc::c_char> = argv
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect();
+        let argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
 
-        let env_ptrs: Vec<*const libc::c_char> = env
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect();
+        let env_ptrs: Vec<*const libc::c_char> = env.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
 
         unsafe {
             libc::execvpe(argv_ptrs[0], argv_ptrs.as_ptr(), env_ptrs.as_ptr());
@@ -489,21 +492,11 @@ pub fn spawn_sandboxed(
         // If execvpe returns, it failed — report the errno.
         let errno = unsafe { *libc::__errno_location() };
         let msg = format!("exec failed (errno {errno}): {}\n", command[0]);
-        let _ = unsafe {
-            libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len())
-        };
+        let _ = unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
         127
     };
 
-    let pid = unsafe {
-        nix::sched::clone(
-            Box::new(child_fn),
-            &mut stack,
-            clone_flags,
-            Some(Signal::SIGCHLD as i32),
-        )
-    }
-    .map_err(|e| {
+    let pid = unsafe { nix::sched::clone(Box::new(child_fn), &mut stack, clone_flags, Some(Signal::SIGCHLD as i32)) }.map_err(|e| {
         let hint = match e {
             nix::errno::Errno::ENOSPC | nix::errno::Errno::ENOMEM => {
                 ". Likely cause: user namespace limit exhausted. \
@@ -627,13 +620,7 @@ impl Drop for InteractiveChild {
 /// # Arguments
 /// Same as [`spawn_sandboxed()`], plus the child inherits the supervisor's
 /// `TERM` environment variable (not hardcoded "dumb").
-pub fn spawn_sandboxed_interactive(
-    config: &SandboxConfig,
-    command: &[String],
-    env_vars: &[(String, String)],
-    trace_enabled: bool,
-    post_map_hook: Option<Box<dyn FnOnce(Pid) -> Result<()>>>,
-) -> Result<InteractiveChild> {
+pub fn spawn_sandboxed_interactive(config: &SandboxConfig, command: &[String], env_vars: &[(String, String)], trace_enabled: bool, post_map_hook: Option<Box<dyn FnOnce(Pid) -> Result<()>>>) -> Result<InteractiveChild> {
     if command.is_empty() {
         return Err(OaieError::SandboxError("empty command".into()));
     }
@@ -646,12 +633,7 @@ pub fn spawn_sandboxed_interactive(
     let (sync_read, sync_write) = pipe_cloexec()?;
 
     // Build clone flags (identical to non-interactive).
-    let mut clone_flags = CloneFlags::CLONE_NEWUSER
-        | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWPID
-        | CloneFlags::CLONE_NEWIPC
-        | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWCGROUP;
+    let mut clone_flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID | CloneFlags::CLONE_NEWIPC | CloneFlags::CLONE_NEWUTS | CloneFlags::CLONE_NEWCGROUP;
 
     if config.network.needs_netns() {
         clone_flags |= CloneFlags::CLONE_NEWNET;
@@ -669,12 +651,7 @@ pub fn spawn_sandboxed_interactive(
     // Inherit TERM from supervisor (not "dumb" — terminal apps need this).
     // Sanitize: only allow safe ASCII chars, cap at 64 chars.
     let supervisor_term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
-    let supervisor_term = if supervisor_term.len() <= 64
-        && !supervisor_term.is_empty()
-        && supervisor_term
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
-    {
+    let supervisor_term = if supervisor_term.len() <= 64 && !supervisor_term.is_empty() && supervisor_term.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
         supervisor_term
     } else {
         "xterm-256color".into()
@@ -693,10 +670,10 @@ pub fn spawn_sandboxed_interactive(
 
         // Block on sync pipe — wait for parent UID/GID maps.
         let mut sync_buf = [0u8; 1];
-        let n = unsafe {
-            libc::read(sync_read_fd, sync_buf.as_mut_ptr() as *mut libc::c_void, 1)
-        };
-        unsafe { libc::close(sync_read_fd); }
+        let n = unsafe { libc::read(sync_read_fd, sync_buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        unsafe {
+            libc::close(sync_read_fd);
+        }
 
         if n != 1 {
             write_err(2, "sync pipe read failed");
@@ -707,12 +684,12 @@ pub fn spawn_sandboxed_interactive(
         let root_path = format!("/tmp/oaie-root-{}", uuid::Uuid::now_v7().simple());
         if let Err(e) = mounts::setup_mounts(&config, &root_path) {
             if let Ok(c_path) = std::ffi::CString::new(root_path.as_bytes()) {
-                unsafe { libc::umount2(c_path.as_ptr(), libc::MNT_DETACH); }
+                unsafe {
+                    libc::umount2(c_path.as_ptr(), libc::MNT_DETACH);
+                }
             }
             if let Err(rm_err) = std::fs::remove_dir(&root_path) {
-                write_err(2, &format!(
-                    "mount cleanup: remove_dir failed: {rm_err}"
-                ));
+                write_err(2, &format!("mount cleanup: remove_dir failed: {rm_err}"));
             }
             write_err(2, &format!("mount setup failed: {e}"));
             return 127;
@@ -741,9 +718,7 @@ pub fn spawn_sandboxed_interactive(
             }
         };
 
-        let slave_fd = unsafe {
-            libc::open(slave_cstr.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC)
-        };
+        let slave_fd = unsafe { libc::open(slave_cstr.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
         if slave_fd < 0 {
             let errno = unsafe { *libc::__errno_location() };
             write_err(2, &format!("open pty slave failed: errno {errno}"));
@@ -755,15 +730,14 @@ pub fn spawn_sandboxed_interactive(
         if unsafe { libc::ioctl(slave_fd, libc::TIOCSCTTY, 0) } < 0 {
             let errno = unsafe { *libc::__errno_location() };
             write_err(2, &format!("TIOCSCTTY failed: errno {errno}"));
-            unsafe { libc::close(slave_fd); }
+            unsafe {
+                libc::close(slave_fd);
+            }
             return 127;
         }
 
         // dup2 slave to stdin/stdout/stderr.
-        if unsafe { libc::dup2(slave_fd, 0) } < 0
-            || unsafe { libc::dup2(slave_fd, 1) } < 0
-            || unsafe { libc::dup2(slave_fd, 2) } < 0
-        {
+        if unsafe { libc::dup2(slave_fd, 0) } < 0 || unsafe { libc::dup2(slave_fd, 1) } < 0 || unsafe { libc::dup2(slave_fd, 2) } < 0 {
             // Write error to fd 2 (stderr) — it may or may not have been
             // overwritten by dup2 yet depending on which call failed.
             write_err(2, "dup2 pty slave failed");
@@ -772,7 +746,9 @@ pub fn spawn_sandboxed_interactive(
 
         // Close the original slave fd (now duplicated to 0/1/2).
         if slave_fd > 2 {
-            unsafe { libc::close(slave_fd); }
+            unsafe {
+                libc::close(slave_fd);
+            }
         }
 
         // PR_SET_NO_NEW_PRIVS — required before Landlock and seccomp.
@@ -782,7 +758,8 @@ pub fn spawn_sandboxed_interactive(
         }
 
         // Apply Landlock filesystem restrictions.
-        match crate::landlock::apply_landlock(config.extra_ro.len(), config.extra_rw.len()) {
+        let session_targets: Vec<(String, bool, bool)> = config.session_mounts.iter().map(|sm| (sm.target.clone(), sm.writable, sm.exec)).collect();
+        match crate::landlock::apply_landlock(config.extra_ro.len(), config.extra_rw.len(), &session_targets) {
             Ok(_) => {}
             Err(e) => {
                 write_err(2, &format!("landlock failed: {e}"));
@@ -795,7 +772,9 @@ pub fn spawn_sandboxed_interactive(
 
         // PR_SET_DUMPABLE — skip when tracing.
         if !trace_enabled {
-            unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0); }
+            unsafe {
+                libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+            }
         }
 
         // ptrace handshake if tracing.
@@ -804,7 +783,9 @@ pub fn spawn_sandboxed_interactive(
                 write_err(2, "ptrace::traceme failed");
                 return 127;
             }
-            unsafe { libc::raise(libc::SIGSTOP); }
+            unsafe {
+                libc::raise(libc::SIGSTOP);
+            }
         }
 
         // Reset personality — PER_LINUX (0x0000) clears READ_IMPLIES_EXEC etc.
@@ -824,11 +805,10 @@ pub fn spawn_sandboxed_interactive(
         }
 
         // Install seccomp filter.
-        if let Err(e) = seccomp::install_seccomp_filter(config.allow_memfd) {
+        let in_host_netns = !config.network.needs_netns();
+        if let Err(e) = seccomp::install_seccomp_filter(config.allow_memfd, in_host_netns) {
             let msg = format!("seccomp install failed: {e}");
-            let _ = unsafe {
-                libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len())
-            };
+            let _ = unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
             return 127;
         }
 
@@ -846,13 +826,7 @@ pub fn spawn_sandboxed_interactive(
             })
             .collect();
         for (key, val) in &env_vars {
-            if key.is_empty()
-                || key.contains('=')
-                || key.contains('\0')
-                || key.contains('\n')
-                || val.contains('\0')
-                || val.contains('\n')
-            {
+            if key.is_empty() || key.contains('=') || key.contains('\0') || key.contains('\n') || val.contains('\0') || val.contains('\n') {
                 write_err(2, "invalid env var: contains forbidden character");
                 return 127;
             }
@@ -864,16 +838,10 @@ pub fn spawn_sandboxed_interactive(
         }
 
         // Build argv.
-        let argv: Vec<CString> = match command
-            .iter()
-            .map(|s| CString::new(s.as_str()))
-            .collect::<std::result::Result<Vec<_>, _>>()
-        {
+        let argv: Vec<CString> = match command.iter().map(|s| CString::new(s.as_str())).collect::<std::result::Result<Vec<_>, _>>() {
             Ok(v) => v,
             Err(_) => {
-                let _ = unsafe {
-                    libc::write(2, b"command contains NUL byte\n".as_ptr() as *const libc::c_void, 26)
-                };
+                let _ = unsafe { libc::write(2, b"command contains NUL byte\n".as_ptr() as *const libc::c_void, 26) };
                 return 127;
             }
         };
@@ -882,17 +850,9 @@ pub fn spawn_sandboxed_interactive(
             return 127;
         }
 
-        let argv_ptrs: Vec<*const libc::c_char> = argv
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect();
+        let argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
 
-        let env_ptrs: Vec<*const libc::c_char> = env
-            .iter()
-            .map(|s| s.as_ptr())
-            .chain(std::iter::once(std::ptr::null()))
-            .collect();
+        let env_ptrs: Vec<*const libc::c_char> = env.iter().map(|s| s.as_ptr()).chain(std::iter::once(std::ptr::null())).collect();
 
         unsafe {
             libc::execvpe(argv_ptrs[0], argv_ptrs.as_ptr(), env_ptrs.as_ptr());
@@ -900,21 +860,11 @@ pub fn spawn_sandboxed_interactive(
 
         let errno = unsafe { *libc::__errno_location() };
         let msg = format!("exec failed (errno {errno}): {}\n", command[0]);
-        let _ = unsafe {
-            libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len())
-        };
+        let _ = unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
         127
     };
 
-    let pid = unsafe {
-        nix::sched::clone(
-            Box::new(child_fn),
-            &mut stack,
-            clone_flags,
-            Some(Signal::SIGCHLD as i32),
-        )
-    }
-    .map_err(|e| {
+    let pid = unsafe { nix::sched::clone(Box::new(child_fn), &mut stack, clone_flags, Some(Signal::SIGCHLD as i32)) }.map_err(|e| {
         let hint = match e {
             nix::errno::Errno::ENOSPC | nix::errno::Errno::ENOMEM => {
                 ". Likely cause: user namespace limit exhausted. \
@@ -964,21 +914,14 @@ pub fn spawn_sandboxed_interactive(
     drop(sync_write);
 
     // Convert PTY master OwnedFd to File for the caller.
-    let pty_master = unsafe {
-        std::fs::File::from_raw_fd(OwnedFd::into_raw_fd(pty_pair.master))
-    };
+    let pty_master = unsafe { std::fs::File::from_raw_fd(OwnedFd::into_raw_fd(pty_pair.master)) };
 
-    Ok(InteractiveChild {
-        pid,
-        reaped: false,
-        pty_master: Some(pty_master),
-    })
+    Ok(InteractiveChild { pid, reaped: false, pty_master: Some(pty_master) })
 }
 
 /// Create a pipe pair with O_CLOEXEC set on both ends.
 fn pipe_cloexec() -> Result<(OwnedFd, OwnedFd)> {
-    let (read, write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
-        .map_err(|e| OaieError::SandboxError(format!("pipe2: {e}")))?;
+    let (read, write) = nix::unistd::pipe2(OFlag::O_CLOEXEC).map_err(|e| OaieError::SandboxError(format!("pipe2: {e}")))?;
     Ok((read, write))
 }
 
@@ -986,8 +929,7 @@ fn pipe_cloexec() -> Result<(OwnedFd, OwnedFd)> {
 fn write_uid_map(pid: Pid, uid: u32) -> Result<()> {
     let path = format!("/proc/{pid}/uid_map");
     let content = format!("0 {uid} 1\n");
-    fs::write(&path, &content)
-        .map_err(|e| OaieError::SandboxError(format!("write uid_map: {e}")))
+    fs::write(&path, &content).map_err(|e| OaieError::SandboxError(format!("write uid_map: {e}")))
 }
 
 /// Write "deny" to setgroups before writing the GID map.
@@ -996,16 +938,14 @@ fn write_uid_map(pid: Pid, uid: u32) -> Result<()> {
 /// without this, writing gid_map fails with EPERM.
 fn write_setgroups_deny(pid: Pid) -> Result<()> {
     let path = format!("/proc/{pid}/setgroups");
-    fs::write(&path, "deny")
-        .map_err(|e| OaieError::SandboxError(format!("write setgroups deny: {e}")))
+    fs::write(&path, "deny").map_err(|e| OaieError::SandboxError(format!("write setgroups deny: {e}")))
 }
 
 /// Write the GID map for a child process: map GID 0 inside → our GID outside.
 fn write_gid_map(pid: Pid, gid: u32) -> Result<()> {
     let path = format!("/proc/{pid}/gid_map");
     let content = format!("0 {gid} 1\n");
-    fs::write(&path, &content)
-        .map_err(|e| OaieError::SandboxError(format!("write gid_map: {e}")))
+    fs::write(&path, &content).map_err(|e| OaieError::SandboxError(format!("write gid_map: {e}")))
 }
 
 /// Write an error message to a raw file descriptor (best-effort, ignores errors).
@@ -1099,13 +1039,11 @@ fn close_range_above(from: RawFd) {
     // Fallback: iterate /proc/self/fd.
     match std::fs::read_dir("/proc/self/fd") {
         Ok(entries) => {
-            let fds: Vec<RawFd> = entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok()))
-                .filter(|&fd| fd >= from)
-                .collect();
+            let fds: Vec<RawFd> = entries.filter_map(|e| e.ok()).filter_map(|e| e.file_name().to_str().and_then(|s| s.parse().ok())).filter(|&fd| fd >= from).collect();
             for fd in fds {
-                unsafe { libc::close(fd); }
+                unsafe {
+                    libc::close(fd);
+                }
             }
         }
         Err(ref e) => {
@@ -1113,17 +1051,13 @@ fn close_range_above(from: RawFd) {
             // Best effort: close up to the system's RLIMIT_NOFILE limit.
             // This is a degraded path — leaked FDs are a minor info leak
             // but not a critical sandbox escape.
-            write_err(2, &format!(
-                "close_range: /proc/self/fd unavailable ({e}), using RLIMIT_NOFILE fallback"
-            ));
+            write_err(2, &format!("close_range: /proc/self/fd unavailable ({e}), using RLIMIT_NOFILE fallback"));
             let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-            let max_fd = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } == 0 {
-                rlim.rlim_cur as RawFd
-            } else {
-                1024
-            };
+            let max_fd = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } == 0 { rlim.rlim_cur.min(65536) as RawFd } else { 1024 };
             for fd in from..max_fd {
-                unsafe { libc::close(fd); }
+                unsafe {
+                    libc::close(fd);
+                }
             }
         }
     }
@@ -1147,9 +1081,14 @@ fn set_rlimits(config: &SandboxConfig) {
     let as_soft = config.max_memory.unwrap_or(4 * 1024 * 1024 * 1024);
     let as_hard = as_soft.saturating_mul(2);
 
+    let nofile_soft = config.max_files.unwrap_or(1024);
+    // Hard = 4× soft so a program that calls setrlimit to raise its own
+    // soft limit has headroom. JVM does this when -XX:-MaxFDLimit is off.
+    let nofile_hard = nofile_soft.saturating_mul(4);
+
     let limits: &[(libc::__rlimit_resource_t, u64, u64)] = &[
-        // Open files: 1024 soft / 4096 hard — enough for most tools.
-        (libc::RLIMIT_NOFILE, 1024, 4096),
+        // Open files: policy-driven (default 1024/4096).
+        (libc::RLIMIT_NOFILE, nofile_soft, nofile_hard),
         // Locked memory: 64 MiB — prevents mlock-based DoS.
         (libc::RLIMIT_MEMLOCK, 64 * 1024 * 1024, 64 * 1024 * 1024),
         // Core dumps: disabled — no sensitive data leaks via cores.
@@ -1173,10 +1112,7 @@ fn set_rlimits(config: &SandboxConfig) {
 
     let mut fail_count = 0usize;
     for &(resource, soft, hard) in limits {
-        let rlim = libc::rlimit {
-            rlim_cur: soft,
-            rlim_max: hard,
-        };
+        let rlim = libc::rlimit { rlim_cur: soft, rlim_max: hard };
         let ret = unsafe { libc::setrlimit(resource, &rlim) };
         if ret != 0 {
             fail_count += 1;
@@ -1209,11 +1145,12 @@ fn set_rlimits(config: &SandboxConfig) {
 ///
 /// Returns `true` on success, `false` if capset fails.
 fn set_caps(retain_mask: u64) -> bool {
+    // Enforce the documented allow-set at the sink: CAP_NET_BIND_SERVICE (10)
+    // and CAP_NET_RAW (13) only. Anything else a caller passes is dropped.
+    let retain_mask = retain_mask & ((1u64 << 10) | (1u64 << 13));
     // Clear ambient capabilities first — these bypass the inheritable check
     // and would let retained caps leak into child processes via execve().
-    let ret = unsafe {
-        libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0)
-    };
+    let ret = unsafe { libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) };
     if ret != 0 {
         return false;
     }
@@ -1249,26 +1186,9 @@ fn set_caps(retain_mask: u64) -> bool {
         version: 0x2008_0522,
         pid: 0, // current process
     };
-    let data = [
-        CapData {
-            effective: low,
-            permitted: low,
-            inheritable: 0,
-        },
-        CapData {
-            effective: high,
-            permitted: high,
-            inheritable: 0,
-        },
-    ];
+    let data = [CapData { effective: low, permitted: low, inheritable: 0 }, CapData { effective: high, permitted: high, inheritable: 0 }];
 
     // SAFETY: capset() with a valid v3 header and correctly-sized data array.
-    let ret = unsafe {
-        libc::syscall(
-            libc::SYS_capset,
-            &header as *const CapHeader,
-            data.as_ptr(),
-        )
-    };
+    let ret = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     ret == 0
 }

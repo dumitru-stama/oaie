@@ -328,15 +328,28 @@ impl StreamingSummarizer {
         match (&event.event_type, &event.detail) {
             (EventType::FileOpen, EventDetail::FileAccess { path, flags, result }) => {
                 self.total_file_events += 1;
-                if is_noise_path(path) {
+                // Never noise-filter writes: the noise list targets dynamic-
+                // loader READ noise, and the tracee chooses the pathname
+                // string freely (dirfd is not resolved).
+                if !is_write_flag(*flags) && is_noise_path(path) {
                     return;
                 }
-                if *result != 0 {
-                    *self.files_denied.entry(path.clone()).or_insert(0) += 1;
+                // result > 0, not != 0: the eBPF backend emits -1 for
+                // "not captured" (sys_enter hook, return value unknown).
+                // Treating -1 as a failure would mark every file under
+                // --trace=ebpf as denied; presume-success is correct here.
+                // See event.rs FileAccess.result doc.
+                let target = if *result > 0 {
+                    &mut self.files_denied
                 } else if is_write_flag(*flags) {
-                    *self.files_written.entry(path.clone()).or_insert(0) += 1;
+                    &mut self.files_written
                 } else {
-                    *self.files_read.entry(path.clone()).or_insert(0) += 1;
+                    &mut self.files_read
+                };
+                if let Some(count) = target.get_mut(path) {
+                    *count += 1;
+                } else if target.len() < MAX_MAP_ENTRIES {
+                    target.insert(path.clone(), 1);
                 }
             }
             (EventType::FileStat, EventDetail::FileStat { .. }) => {
@@ -355,13 +368,19 @@ impl StreamingSummarizer {
                     }
                 }
 
-                if *result == 0 {
-                    let key = (address.clone(), family.clone());
-                    let entry = self.net_connects.entry(key).or_insert((0, true));
-                    entry.0 += 1;
-                } else {
-                    let key = (address.clone(), family.clone());
-                    *self.net_denied.entry(key).or_insert(0) += 1;
+                let key = (address.clone(), family.clone());
+                // <= 0 buckets eBPF's -1 (not-captured) with success.
+                // Same rationale as the FileAccess result check above.
+                if *result <= 0 {
+                    if let Some(entry) = self.net_connects.get_mut(&key) {
+                        entry.0 += 1;
+                    } else if self.net_connects.len() < MAX_MAP_ENTRIES {
+                        self.net_connects.insert(key, (1, true));
+                    }
+                } else if let Some(count) = self.net_denied.get_mut(&key) {
+                    *count += 1;
+                } else if self.net_denied.len() < MAX_MAP_ENTRIES {
+                    self.net_denied.insert(key, 1);
                 }
             }
             (EventType::DnsQuery, EventDetail::DnsQuery { name, server, result }) => {
@@ -415,7 +434,7 @@ impl StreamingSummarizer {
                 succeeded,
             })
             .collect();
-        net_connects.sort_by(|a, b| b.count.cmp(&a.count));
+        net_connects.sort_by_key(|b| std::cmp::Reverse(b.count));
 
         let mut net_denied: Vec<NetConnectEntry> = self.net_denied
             .into_iter()
@@ -426,7 +445,7 @@ impl StreamingSummarizer {
                 succeeded: false,
             })
             .collect();
-        net_denied.sort_by(|a, b| b.count.cmp(&a.count));
+        net_denied.sort_by_key(|b| std::cmp::Reverse(b.count));
 
         let mut dns_queries: Vec<DnsQueryEntry> = self.dns_queries
             .into_iter()
@@ -589,6 +608,16 @@ fn parent_dir(path: &str) -> String {
 /// locale data, and NSS libraries that would clutter the summary
 /// without providing useful information.
 fn is_noise_path(path: &str) -> bool {
+    // The path string is whatever the tracee passed to openat(); it is NOT
+    // canonicalized. A tracee can hide a real read by prefixing it with a
+    // noise prefix and dot-dotting back out: "/dev/../etc/shadow" matches
+    // the "/dev/" prefix below but resolves to /etc/shadow. Never noise-
+    // filter a path with parent-dir traversal — record it and let the
+    // operator decide. (Writes are already excluded from noise filtering
+    // at the caller; this closes the read direction.)
+    if path.contains("/../") || path.ends_with("/..") {
+        return false;
+    }
     if path.starts_with("/proc/self")
         || path.starts_with("/proc/thread-self")
         || path.starts_with("/proc/filesystems")

@@ -263,7 +263,14 @@ pub fn convert_raw_event(raw: &RawEvent, start_mono_ns: u64) -> Option<OaieEvent
                 EventDetail::FileAccess {
                     path,
                     flags: payload.flags,
-                    result: 0, // sys_enter has no return value.
+                    // sys_enter_* fires BEFORE the syscall returns; we have
+                    // no return value. -1 is the not-captured sentinel
+                    // (errno is always positive, so >0 = denied, 0 = ok,
+                    // -1 = unknown). Was 0 here, which collided with the
+                    // ptrace backend's "actually succeeded" — summary.rs
+                    // saw `result != 0` as always-false under eBPF and
+                    // never populated files_denied. See event.rs result doc.
+                    result: -1,
                 },
             )
         }
@@ -276,7 +283,7 @@ pub fn convert_raw_event(raw: &RawEvent, start_mono_ns: u64) -> Option<OaieEvent
                 EventDetail::NetConnect {
                     family,
                     address,
-                    result: 0, // sys_enter has no return value.
+                    result: -1, // sys_enter — not captured. See FileAccess above.
                 },
             )
         }

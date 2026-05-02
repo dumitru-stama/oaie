@@ -9,8 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use http_body_util::BodyExt;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Bytes;
 use hyper::Request;
 use serde::{Deserialize, Serialize};
@@ -193,17 +192,14 @@ impl FirecrackerApi {
             if !status.is_success() {
                 // Limit error body to 64 KiB to prevent a misbehaving
                 // Firecracker from sending unbounded error responses.
-                let body_bytes = resp
-                    .into_body()
+                // Limited enforces the cap during streaming; collect() will
+                // return an error if the body exceeds the limit, instead of
+                // buffering the whole thing first.
+                let body_bytes = Limited::new(resp.into_body(), 65536)
                     .collect()
                     .await
                     .map_err(|e| OaieError::Io(io_err(&e)))?
                     .to_bytes();
-                let body_bytes = if body_bytes.len() > 65536 {
-                    body_bytes.slice(..65536)
-                } else {
-                    body_bytes
-                };
 
                 let detail = if let Ok(api_err) = serde_json::from_slice::<ApiError>(&body_bytes) {
                     api_err

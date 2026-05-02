@@ -270,3 +270,129 @@ fn output_writable() {
     let content = fs::read_to_string(out_dir.join("test.txt")).unwrap();
     assert_eq!(content.trim(), "result");
 }
+
+#[test]
+fn af_alg_socket_blocked() {
+    // CVE-2026-31431 ("Copy Fail") and the earlier algif_aead CVEs all
+    // begin with socket(AF_ALG, …). The seccomp errno tier returns EPERM
+    // before __sock_create runs, so the chain can't begin. The
+    // filter-structure tests catch arithmetic regressions; this test
+    // catches the "filter built fine but the kernel ignored it" failure
+    // mode where the BPF program is loaded but a syscall reordering or
+    // arch mismatch lets AF_ALG through.
+    if !userns_available() {
+        eprintln!("skipping: user namespaces not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let in_dir = dir.path().join("in");
+    let out_dir = dir.path().join("out");
+    fs::create_dir_all(&in_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let config = SandboxConfig {
+        input_dir: in_dir,
+        output_dir: out_dir,
+        ..Default::default()
+    };
+
+    // AF_ALG = 38, SOCK_SEQPACKET = 5 (the family/type the algif_*
+    // exploits use). Exit codes:
+    //   0 — socket() failed with EPERM (the seccomp block fired).
+    //   1 — socket() succeeded (filter not enforced — REGRESSION).
+    //   2 — socket() failed with a different errno (still a regression
+    //       since the contract is "EPERM via errno tier"; e.g. ENOSYS
+    //       would mean the family is unknown to the kernel rather than
+    //       blocked, which is a weaker guarantee).
+    let script = "import socket, errno, sys\n\
+        try:\n\
+        \x20   s = socket.socket(38, 5, 0)\n\
+        \x20   s.close()\n\
+        \x20   sys.exit(1)\n\
+        except OSError as e:\n\
+        \x20   sys.exit(0 if e.errno == errno.EPERM else 2)\n";
+
+    let mut child = spawn_sandboxed(
+        &config,
+        &["python3".into(), "-c".into(), script.into()],
+        &[],
+        false,
+        None,
+    )
+    .unwrap();
+
+    drop(child.take_stdout());
+    drop(child.take_stderr());
+
+    child.mark_reaped();
+    let status = nix::sys::wait::waitpid(child.pid, None).unwrap();
+    match status {
+        nix::sys::wait::WaitStatus::Exited(_, code) => {
+            assert_eq!(
+                code, 0,
+                "AF_ALG socket should be blocked with EPERM (got exit code {code}: \
+                 1=socket succeeded, 2=blocked with wrong errno)"
+            );
+        }
+        other => panic!("unexpected wait status: {other:?}"),
+    }
+}
+
+#[test]
+fn af_alg_socketpair_blocked() {
+    // socketpair() reaches the same __sock_create path as socket(), so
+    // the filter has a separate dispatch JEQ that routes socketpair into
+    // the AF arg-inspection block. This test guards against a reordering
+    // that drops or skips that JEQ — the filter would still build, the
+    // socket() block would still work, but socketpair(AF_ALG, …) would
+    // sneak through to the same exploit primitive.
+    if !userns_available() {
+        eprintln!("skipping: user namespaces not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let in_dir = dir.path().join("in");
+    let out_dir = dir.path().join("out");
+    fs::create_dir_all(&in_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let config = SandboxConfig {
+        input_dir: in_dir,
+        output_dir: out_dir,
+        ..Default::default()
+    };
+
+    let script = "import socket, errno, sys\n\
+        try:\n\
+        \x20   a, b = socket.socketpair(38, 5, 0)\n\
+        \x20   a.close(); b.close()\n\
+        \x20   sys.exit(1)\n\
+        except OSError as e:\n\
+        \x20   sys.exit(0 if e.errno == errno.EPERM else 2)\n";
+
+    let mut child = spawn_sandboxed(
+        &config,
+        &["python3".into(), "-c".into(), script.into()],
+        &[],
+        false,
+        None,
+    )
+    .unwrap();
+
+    drop(child.take_stdout());
+    drop(child.take_stderr());
+
+    child.mark_reaped();
+    let status = nix::sys::wait::waitpid(child.pid, None).unwrap();
+    match status {
+        nix::sys::wait::WaitStatus::Exited(_, code) => {
+            assert_eq!(
+                code, 0,
+                "socketpair(AF_ALG, …) should be blocked with EPERM (got exit code {code})"
+            );
+        }
+        other => panic!("unexpected wait status: {other:?}"),
+    }
+}

@@ -121,15 +121,15 @@ pub fn auto_mount_paths(
         if is_under_deny(&canonical, &canonical_deny) {
             continue;
         }
-        seen.insert(canonical);
+        seen.insert(canonical.clone());
         eprintln!(
             "OAIE: auto-mount (ro): {} (for executable {})",
-            mount_dir.display(),
+            canonical.display(),
             path.display()
         );
         entries.push(AutoMountEntry {
             path: path.clone(),
-            mount_dir,
+            mount_dir: canonical,
             mode: "ro".into(),
             source: "executable".into(),
         });
@@ -147,15 +147,15 @@ pub fn auto_mount_paths(
         if is_under_deny(&canonical, &canonical_deny) {
             continue;
         }
-        seen.insert(canonical);
+        seen.insert(canonical.clone());
         eprintln!(
             "OAIE: auto-mount (rw): {} (for argument {})",
-            mount_dir.display(),
+            canonical.display(),
             path.display()
         );
         entries.push(AutoMountEntry {
             path: path.clone(),
-            mount_dir,
+            mount_dir: canonical,
             mode: "rw".into(),
             source: "argument".into(),
         });
@@ -199,10 +199,10 @@ pub fn is_under_system_dirs(path: &Path) -> bool {
     false
 }
 
-/// Check if a path falls under any deny path.
+/// Check if a path falls under any deny path, or would expose one as a subdirectory.
 fn is_under_deny(path: &Path, deny_paths: &[PathBuf]) -> bool {
     for deny in deny_paths {
-        if path.starts_with(deny) {
+        if path.starts_with(deny) || deny.starts_with(path) {
             return true;
         }
     }

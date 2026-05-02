@@ -173,7 +173,7 @@ fn handle_request(
                 return protocol::Response::error("invalid cgroup path");
             }
 
-            match cgroup::cleanup_cgroup(std::path::Path::new(cgroup_path)) {
+            match cgroup::cleanup_cgroup(std::path::Path::new(cgroup_path), peer_uid) {
                 Ok(()) => {
                     audit::log_action(caller_uid, caller_pid, "cleanup_cgroup", "ok");
                     protocol::Response::ok()
@@ -209,18 +209,57 @@ fn handle_request(
             protocol::Response::ok()
         }
 
-        protocol::Request::SetupNetns { sandbox_pid, run_id_short, nft_script } => {
+        protocol::Request::SetupNetns { sandbox_pid, run_id_short, allow_rules } => {
+            if *sandbox_pid == 0 {
+                audit::log_action(caller_uid, caller_pid, "setup_netns", "rejected: sandbox_pid is 0");
+                return protocol::Response::error("invalid sandbox_pid");
+            }
+            if let Err(e) = validate::validate_run_id(run_id_short) {
+                audit::log_action(caller_uid, caller_pid, "setup_netns", &format!("rejected: {e}"));
+                return protocol::Response::error("invalid run_id_short");
+            }
+            if allow_rules.len() > validate::MAX_ALLOW_RULES {
+                audit::log_action(
+                    caller_uid,
+                    caller_pid,
+                    "setup_netns",
+                    &format!("rejected: {} rules exceeds max {}", allow_rules.len(), validate::MAX_ALLOW_RULES),
+                );
+                return protocol::Response::error("too many allow rules");
+            }
+            for (i, rule) in allow_rules.iter().enumerate() {
+                if let Err(e) = validate::validate_allow_rule(rule) {
+                    audit::log_action(
+                        caller_uid,
+                        caller_pid,
+                        "setup_netns",
+                        &format!("rejected: rule[{i}]: {e}"),
+                    );
+                    return protocol::Response::error("invalid allow rule");
+                }
+            }
             audit::log_action(
                 caller_uid,
                 caller_pid,
                 "setup_netns",
-                &format!("pid={sandbox_pid} run={run_id_short} nft_len={}", nft_script.len()),
+                &format!("pid={sandbox_pid} run={run_id_short} rules={}", allow_rules.len()),
             );
-            // TODO: implement veth pair + NAT + nftables setup.
+            // TODO: implement veth pair + NAT + nftables setup. Generate
+            // the nft script HERE from `allow_rules` (see oaie-netpol's
+            // generate_nft_script for the template). Never accept a
+            // pre-built script from the caller — that would be an
+            // arbitrary-command channel into CAP_NET_ADMIN.
             protocol::Response::error("setup_netns not yet implemented")
         }
 
         protocol::Request::CleanupNetns { host_iface, nat_subnet, host_default_iface } => {
+            if let Err(e) = validate::validate_iface_name(host_iface)
+                .and_then(|_| validate::validate_iface_name(host_default_iface))
+                .and_then(|_| validate::validate_subnet(nat_subnet))
+            {
+                audit::log_action(caller_uid, caller_pid, "cleanup_netns", &format!("rejected: {e}"));
+                return protocol::Response::error("invalid netns parameters");
+            }
             audit::log_action(
                 caller_uid,
                 caller_pid,
@@ -253,6 +292,34 @@ fn handle_load_bpf(
         // Send error via sendmsg (no length prefix) to match the client's
         // recv_response_with_fds which uses recvmsg, not length-prefixed read.
         let resp = protocol::Response::error("invalid ring buffer size");
+        if let Ok(payload) = serde_json::to_vec(&resp) {
+            let _ = oaie_priv::fd_passing::send_response_with_fds(stream, &payload, &[]);
+        }
+        return;
+    }
+
+    // Validate cgroup_id: reject the wildcard (0 = "trace everything" in the
+    // BPF program's cgroup_match()) and verify the caller owns the target
+    // cgroup under /sys/fs/cgroup/oaie (cgroup.procs was chowned to the
+    // creator's UID by create_cgroup).
+    let authorized = caller_uid.map_or(false, |uid| {
+        cgroup_id != 0
+            && std::fs::read_dir("/sys/fs/cgroup/oaie")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|entry| {
+                    use std::os::unix::fs::MetadataExt;
+                    entry.metadata().ok().map(|m| m.ino()) == Some(cgroup_id)
+                        && std::fs::metadata(entry.path().join("cgroup.procs"))
+                            .ok()
+                            .map(|m| m.uid())
+                            == Some(uid)
+                })
+    });
+    if !authorized {
+        audit::log_action(caller_uid, caller_pid, "load_bpf", &format!("rejected: unauthorized cgroup_id={cgroup_id}"));
+        let resp = protocol::Response::error("unauthorized cgroup");
         if let Ok(payload) = serde_json::to_vec(&resp) {
             let _ = oaie_priv::fd_passing::send_response_with_fds(stream, &payload, &[]);
         }
@@ -314,8 +381,13 @@ fn handle_load_bpf(
     // max timeout of ~600s, but BPF program attachment needs much less.
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(60)));
 
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let mut len_buf = [0u8; 4];
     loop {
+        if std::time::Instant::now() >= deadline {
+            audit::log_action(caller_uid, caller_pid, "unload_bpf", "deadline exceeded");
+            break;
+        }
         match stream.read_exact(&mut len_buf) {
             Ok(()) => {
                 let req_len = u32::from_be_bytes(len_buf);

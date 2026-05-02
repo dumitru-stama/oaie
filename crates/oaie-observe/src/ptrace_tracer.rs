@@ -89,11 +89,7 @@ fn wait_for_sigchld(sigchld_fd: Option<libc::c_int>, timeout_ms: libc::c_int) {
     };
 
     unsafe {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
 
         libc::poll(&mut pfd, 1, timeout_ms);
 
@@ -154,27 +150,13 @@ fn get_regs(pid: Pid) -> Result<SyscallRegs, nix::errno::Errno> {
             iov_base: &mut regs as *mut _ as *mut _,
             iov_len: mem::size_of_val(&regs),
         };
-        let ret = unsafe {
-            libc::ptrace(
-                libc::PTRACE_GETREGSET,
-                pid.as_raw(),
-                libc::NT_PRSTATUS,
-                &mut iov as *mut _,
-            )
-        };
+        let ret = unsafe { libc::ptrace(libc::PTRACE_GETREGSET, pid.as_raw(), libc::NT_PRSTATUS, &mut iov as *mut _) };
         if ret < 0 {
             return Err(nix::errno::Errno::last());
         }
         Ok(SyscallRegs {
             syscall_nr: regs.regs[8],
-            args: [
-                regs.regs[0],
-                regs.regs[1],
-                regs.regs[2],
-                regs.regs[3],
-                regs.regs[4],
-                regs.regs[5],
-            ],
+            args: [regs.regs[0], regs.regs[1], regs.regs[2], regs.regs[3], regs.regs[4], regs.regs[5]],
             ret_val: regs.regs[0] as i64,
         })
     }
@@ -184,14 +166,7 @@ fn get_regs(pid: Pid) -> Result<SyscallRegs, nix::errno::Errno> {
         let regs = ptrace::getregs(pid)?;
         Ok(SyscallRegs {
             syscall_nr: regs.a7 as u64,
-            args: [
-                regs.a0 as u64,
-                regs.a1 as u64,
-                regs.a2 as u64,
-                regs.a3 as u64,
-                regs.a4 as u64,
-                regs.a5 as u64,
-            ],
+            args: [regs.a0 as u64, regs.a1 as u64, regs.a2 as u64, regs.a3 as u64, regs.a4 as u64, regs.a5 as u64],
             ret_val: regs.a0 as i64,
         })
     }
@@ -316,18 +291,17 @@ impl PtraceTracer {
 
     /// Main trace loop. Runs until all traced processes exit.
     ///
-    /// Returns `(exit_code, writer, io_uring_detected)`. The `io_uring_detected`
-    /// flag is true if `io_uring_setup` was observed — indicating the trace
-    /// has blind spots (io_uring operations are invisible to ptrace).
-    pub fn run(mut self) -> Result<(i32, ChunkedEventWriter, bool), TracerError> {
+    /// Returns `(exit_code, writer, io_uring_detected, dropped_events)`. The
+    /// `io_uring_detected` flag is true if `io_uring_setup` was observed —
+    /// indicating the trace has blind spots (io_uring operations are invisible
+    /// to ptrace). `dropped_events` counts events that failed to write.
+    pub fn run(mut self) -> Result<(i32, ChunkedEventWriter, bool, u64), TracerError> {
         // Wait for the initial SIGSTOP from the child (raised after traceme).
         match waitpid(self.root_pid, Some(WaitPidFlag::__WALL)) {
             Ok(WaitStatus::Stopped(_, Signal::SIGSTOP)) => {}
             Ok(WaitStatus::Stopped(_, Signal::SIGTRAP)) => {}
             Ok(other) => {
-                return Err(TracerError::Unexpected(format!(
-                    "expected initial SIGSTOP, got {other:?}"
-                )));
+                return Err(TracerError::Unexpected(format!("expected initial SIGSTOP, got {other:?}")));
             }
             Err(e) => return Err(TracerError::Nix(e)),
         }
@@ -401,9 +375,7 @@ impl PtraceTracer {
                         }
                     }
                     WaitStatus::Stopped(pid, signal) => {
-                        if signal == Signal::SIGSTOP
-                            && !self.traced_pids.contains(&pid.as_raw())
-                        {
+                        if signal == Signal::SIGSTOP && !self.traced_pids.contains(&pid.as_raw()) {
                             self.traced_pids.insert(pid.as_raw());
                             let _ = self.setup_ptrace_options(pid);
                             if let Err(nix::errno::Errno::ESRCH) = ptrace::syscall(pid, None) {
@@ -411,9 +383,7 @@ impl PtraceTracer {
                             }
                         } else {
                             // Deliver the signal to the process.
-                            if let Err(nix::errno::Errno::ESRCH) =
-                                ptrace::syscall(pid, Some(signal))
-                            {
+                            if let Err(nix::errno::Errno::ESRCH) = ptrace::syscall(pid, Some(signal)) {
                                 self.traced_pids.remove(&pid.as_raw());
                             }
                         }
@@ -469,19 +439,14 @@ impl PtraceTracer {
         // Clean up signalfd and unblock SIGCHLD on this thread.
         cleanup_signalfd(sigchld_fd);
 
-        Ok((last_exit_code, self.writer, self.io_uring_detected))
+        Ok((last_exit_code, self.writer, self.io_uring_detected, self.dropped_events))
     }
 
     /// Set ptrace options: follow forks/clones, mark syscalls, kill on tracer death.
     fn setup_ptrace_options(&self, pid: Pid) -> Result<(), TracerError> {
         ptrace::setoptions(
             pid,
-            ptrace::Options::PTRACE_O_TRACESYSGOOD
-                | ptrace::Options::PTRACE_O_TRACEFORK
-                | ptrace::Options::PTRACE_O_TRACEVFORK
-                | ptrace::Options::PTRACE_O_TRACECLONE
-                | ptrace::Options::PTRACE_O_TRACEEXEC
-                | ptrace::Options::PTRACE_O_EXITKILL,
+            ptrace::Options::PTRACE_O_TRACESYSGOOD | ptrace::Options::PTRACE_O_TRACEFORK | ptrace::Options::PTRACE_O_TRACEVFORK | ptrace::Options::PTRACE_O_TRACECLONE | ptrace::Options::PTRACE_O_TRACEEXEC | ptrace::Options::PTRACE_O_EXITKILL,
         )
         .map_err(TracerError::Nix)
     }
@@ -493,10 +458,7 @@ impl PtraceTracer {
 
     /// Look up parent PID for a traced process.
     fn get_ppid(&self, pid: Pid) -> u32 {
-        self.parent_map
-            .get(&pid.as_raw())
-            .copied()
-            .unwrap_or(0) as u32
+        self.parent_map.get(&pid.as_raw()).copied().unwrap_or(0) as u32
     }
 
     /// Number of events that failed to write during the trace.
@@ -525,14 +487,7 @@ impl PtraceTracer {
             }
         };
 
-        let state = self
-            .syscall_states
-            .entry(pid.as_raw())
-            .or_insert(SyscallState {
-                in_entry: true,
-                syscall_nr: 0,
-                args: [0; 6],
-            });
+        let state = self.syscall_states.entry(pid.as_raw()).or_insert(SyscallState { in_entry: true, syscall_nr: 0, args: [0; 6] });
 
         if state.in_entry {
             // Syscall entry: capture number and arguments.
@@ -550,9 +505,19 @@ impl PtraceTracer {
             #[allow(unreachable_patterns)]
             match nr {
                 SYS_OPENAT => self.on_openat_entry(pid, &args),
+                SYS_OPENAT2 => self.on_openat2_entry(pid, &args),
                 // Legacy open(pathname, flags, mode) — x86_64 only (u64::MAX on aarch64/rv64gc).
                 SYS_OPEN => self.on_open_entry(pid, &args),
                 SYS_EXECVE => self.on_execve_entry(pid, &args),
+                // execveat(dirfd, pathname, argv, envp, flags) — same exec
+                // semantics, different arg layout. Without this arm,
+                // pending_execs is never populated for execveat → the
+                // PTRACE_EVENT_EXEC consumer finds nothing → no ProcessExec
+                // event, OR (worse) its last-resort .next() steals another
+                // PID's pending entry and misattributes the argv. A tracee
+                // can substitute execveat(AT_FDCWD, path, ...) for execve
+                // and vanish from the exec trace.
+                SYS_EXECVEAT => self.on_execveat_entry(pid, &args),
                 SYS_CONNECT => self.on_connect_entry(pid, &args),
                 // statx/newfstatat: pathname at args[1].
                 SYS_STATX | SYS_NEWFSTATAT => self.on_statx_entry(pid, &args),
@@ -576,7 +541,7 @@ impl PtraceTracer {
 
             #[allow(unreachable_patterns)]
             match nr {
-                SYS_OPENAT | SYS_OPEN => self.on_openat_exit(pid, ret),
+                SYS_OPENAT | SYS_OPEN | SYS_OPENAT2 => self.on_openat_exit(pid, ret),
                 SYS_CONNECT => self.on_connect_exit(pid, ret),
                 SYS_SENDTO => self.on_sendto_exit(pid, ret),
                 SYS_STATX | SYS_NEWFSTATAT | SYS_STAT | SYS_LSTAT => self.on_statx_exit(pid, ret),
@@ -591,16 +556,22 @@ impl PtraceTracer {
         // openat(dirfd, pathname, flags, mode)
         let path = memory::read_string(pid, args[1], 4096);
         let flags = args[2] as u32;
-        self.pending_opens
-            .insert(pid.as_raw(), PendingOpen { path, flags });
+        self.pending_opens.insert(pid.as_raw(), PendingOpen { path, flags });
     }
 
     fn on_open_entry(&mut self, pid: Pid, args: &[u64; 6]) {
         // Legacy open(pathname, flags, mode) — x86_64 only.
         let path = memory::read_string(pid, args[0], 4096);
         let flags = args[1] as u32;
-        self.pending_opens
-            .insert(pid.as_raw(), PendingOpen { path, flags });
+        self.pending_opens.insert(pid.as_raw(), PendingOpen { path, flags });
+    }
+
+    fn on_openat2_entry(&mut self, pid: Pid, args: &[u64; 6]) {
+        // openat2(dirfd, pathname, struct open_how *, size)
+        // open_how.flags is the first u64 of the struct.
+        let path = memory::read_string(pid, args[1], 4096);
+        let flags = ptrace::read(pid, args[2] as *mut _).map(|w| w as u32).unwrap_or(0);
+        self.pending_opens.insert(pid.as_raw(), PendingOpen { path, flags });
     }
 
     fn on_openat_exit(&mut self, pid: Pid, ret: i64) {
@@ -611,11 +582,7 @@ impl PtraceTracer {
                 event_type: EventType::FileOpen,
                 pid: pid.as_raw() as u32,
                 ppid: None,
-                detail: EventDetail::FileAccess {
-                    path: pending.path,
-                    flags: pending.flags,
-                    result,
-                },
+                detail: EventDetail::FileAccess { path: pending.path, flags: pending.flags, result },
                 hash_prev: String::new(),
             });
         }
@@ -627,17 +594,29 @@ impl PtraceTracer {
         // PTRACE_EVENT_EXEC confirms the execve succeeded.
         let filename = memory::read_string(pid, args[0], 4096);
         let argv = memory::read_string_array(pid, args[1], 32);
-        self.pending_execs.insert(
-            pid.as_raw(),
-            PendingExec { filename, argv },
-        );
+        self.pending_execs.insert(pid.as_raw(), PendingExec { filename, argv });
+    }
+
+    fn on_execveat_entry(&mut self, pid: Pid, args: &[u64; 6]) {
+        // execveat(dirfd, pathname, argv, envp, flags) — pathname at args[1],
+        // argv at args[2] (vs execve's [0]/[1]). With AT_EMPTY_PATH the
+        // pathname is "" and the target is dirfd itself (memfd / O_PATH fd);
+        // record it as "<execveat fd=N>" so the trace shows SOMETHING rather
+        // than an empty string that looks like a dropped read. dirfd-relative
+        // paths are recorded as-is — resolving against /proc/<pid>/fd/<dirfd>
+        // would need another tracee read and the relative path + the
+        // SecurityRelevant fileless_exec flag (set separately at the
+        // SYS_EXECVEAT check below) is enough for audit.
+        let flags = args[4] as i32;
+        let filename = if flags & libc::AT_EMPTY_PATH != 0 { format!("<execveat fd={}>", args[0] as i32) } else { memory::read_string(pid, args[1], 4096) };
+        let argv = memory::read_string_array(pid, args[2], 32);
+        self.pending_execs.insert(pid.as_raw(), PendingExec { filename, argv });
     }
 
     fn on_connect_entry(&mut self, pid: Pid, args: &[u64; 6]) {
         // connect(sockfd, addr, addrlen)
         let addr_info = memory::read_sockaddr(pid, args[1], args[2] as usize);
-        self.pending_connects
-            .insert(pid.as_raw(), PendingConnect { addr_info });
+        self.pending_connects.insert(pid.as_raw(), PendingConnect { addr_info });
     }
 
     fn on_connect_exit(&mut self, pid: Pid, ret: i64) {
@@ -672,8 +651,7 @@ impl PtraceTracer {
         let addr_info = memory::read_sockaddr(pid, dest_addr_ptr, addrlen);
 
         // Check if this is a send to port 53 (DNS).
-        let is_dns = (addr_info.family == "AF_INET" || addr_info.family == "AF_INET6")
-            && addr_info.display.ends_with(":53");
+        let is_dns = (addr_info.family == "AF_INET" || addr_info.family == "AF_INET6") && addr_info.display.ends_with(":53");
 
         if !is_dns {
             return;
@@ -685,13 +663,7 @@ impl PtraceTracer {
         let payload = memory::read_bytes(pid, buf_ptr, buf_len.min(512));
 
         if let Some(name) = memory::parse_dns_query_name(&payload) {
-            self.pending_sendtos.insert(
-                pid.as_raw(),
-                PendingSendto {
-                    dns_name: name,
-                    server: addr_info.display,
-                },
-            );
+            self.pending_sendtos.insert(pid.as_raw(), PendingSendto { dns_name: name, server: addr_info.display });
         }
     }
 
@@ -703,11 +675,7 @@ impl PtraceTracer {
                 event_type: EventType::DnsQuery,
                 pid: pid.as_raw() as u32,
                 ppid: None,
-                detail: EventDetail::DnsQuery {
-                    name: pending.dns_name,
-                    server: pending.server,
-                    result,
-                },
+                detail: EventDetail::DnsQuery { name: pending.dns_name, server: pending.server, result },
                 hash_prev: String::new(),
             });
         }
@@ -716,15 +684,13 @@ impl PtraceTracer {
     fn on_statx_entry(&mut self, pid: Pid, args: &[u64; 6]) {
         // statx(dirfd, pathname, flags, mask, statxbuf)
         let path = memory::read_string(pid, args[1], 4096);
-        self.pending_statxs
-            .insert(pid.as_raw(), PendingStatx { path });
+        self.pending_statxs.insert(pid.as_raw(), PendingStatx { path });
     }
 
     fn on_stat_entry(&mut self, pid: Pid, args: &[u64; 6]) {
         // Legacy stat/lstat(pathname, statbuf) — x86_64 only.
         let path = memory::read_string(pid, args[0], 4096);
-        self.pending_statxs
-            .insert(pid.as_raw(), PendingStatx { path });
+        self.pending_statxs.insert(pid.as_raw(), PendingStatx { path });
     }
 
     fn on_statx_exit(&mut self, pid: Pid, ret: i64) {
@@ -735,10 +701,7 @@ impl PtraceTracer {
                 event_type: EventType::FileStat,
                 pid: pid.as_raw() as u32,
                 ppid: None,
-                detail: EventDetail::FileStat {
-                    path: pending.path,
-                    result,
-                },
+                detail: EventDetail::FileStat { path: pending.path, result },
                 hash_prev: String::new(),
             });
         }
@@ -835,10 +798,7 @@ impl PtraceTracer {
                         event_type: EventType::SecurityRelevant,
                         pid: pid.as_raw() as u32,
                         ppid: Some(self.get_ppid(pid)),
-                        detail: EventDetail::SecurityRelevant {
-                            syscall: "clone3_into_cgroup".into(),
-                            syscall_nr: nr,
-                        },
+                        detail: EventDetail::SecurityRelevant { syscall: "clone3_into_cgroup".into(), syscall_nr: nr },
                         hash_prev: String::new(),
                     });
                 }
@@ -869,10 +829,7 @@ impl PtraceTracer {
                 event_type: EventType::SecurityRelevant,
                 pid: pid.as_raw() as u32,
                 ppid: Some(self.get_ppid(pid)),
-                detail: EventDetail::SecurityRelevant {
-                    syscall: "ptrace_traceme".into(),
-                    syscall_nr: nr,
-                },
+                detail: EventDetail::SecurityRelevant { syscall: "ptrace_traceme".into(), syscall_nr: nr },
                 hash_prev: String::new(),
             });
         }
@@ -881,20 +838,13 @@ impl PtraceTracer {
         // page faults can be handled — the dangerous mode for kernel exploits.
         if nr == SYS_USERFAULTFD {
             const UFFD_USER_MODE_ONLY: u64 = 1;
-            let severity = if args[0] & UFFD_USER_MODE_ONLY == 0 {
-                "userfaultfd_kernel_mode"
-            } else {
-                "userfaultfd_user_mode"
-            };
+            let severity = if args[0] & UFFD_USER_MODE_ONLY == 0 { "userfaultfd_kernel_mode" } else { "userfaultfd_user_mode" };
             self.try_write(OaieEvent {
                 ts_ns: self.elapsed_ns(),
                 event_type: EventType::SecurityRelevant,
                 pid: pid.as_raw() as u32,
                 ppid: Some(self.get_ppid(pid)),
-                detail: EventDetail::SecurityRelevant {
-                    syscall: severity.into(),
-                    syscall_nr: nr,
-                },
+                detail: EventDetail::SecurityRelevant { syscall: severity.into(), syscall_nr: nr },
                 hash_prev: String::new(),
             });
             return; // Don't also emit the generic event (would duplicate).
@@ -903,11 +853,7 @@ impl PtraceTracer {
         // process_vm_readv/writev: emit target PID from arg0.
         if nr == SYS_PROCESS_VM_READV || nr == SYS_PROCESS_VM_WRITEV {
             let target_pid = args[0] as u32;
-            let op = if nr == SYS_PROCESS_VM_READV {
-                "process_vm_readv"
-            } else {
-                "process_vm_writev"
-            };
+            let op = if nr == SYS_PROCESS_VM_READV { "process_vm_readv" } else { "process_vm_writev" };
             self.try_write(OaieEvent {
                 ts_ns: self.elapsed_ns(),
                 event_type: EventType::SecurityRelevant,
@@ -984,10 +930,7 @@ impl PtraceTracer {
             event_type: EventType::SecurityRelevant,
             pid: pid.as_raw() as u32,
             ppid: Some(self.get_ppid(pid)),
-            detail: EventDetail::SecurityRelevant {
-                syscall: name.into(),
-                syscall_nr: nr,
-            },
+            detail: EventDetail::SecurityRelevant { syscall: name.into(), syscall_nr: nr },
             hash_prev: String::new(),
         });
     }
@@ -1025,11 +968,7 @@ impl PtraceTracer {
             53 => {
                 if args[2] == 1 {
                     // PR_SPEC_ENABLE
-                    Some(if args[1] == 0 {
-                        "prctl_enable_speculation_ssb"
-                    } else {
-                        "prctl_enable_speculation_indirect_branch"
-                    })
+                    Some(if args[1] == 0 { "prctl_enable_speculation_ssb" } else { "prctl_enable_speculation_indirect_branch" })
                 } else {
                     None
                 }
@@ -1038,11 +977,7 @@ impl PtraceTracer {
         };
 
         // PR_SET_PTRACER (0x59616d61) — Yama ptracer override.
-        let label = if option == 0x59616d61u32 as i32 {
-            Some("prctl_set_ptracer")
-        } else {
-            syscall_label
-        };
+        let label = if option == 0x59616d61u32 as i32 { Some("prctl_set_ptracer") } else { syscall_label };
 
         if let Some(name) = label {
             self.try_write(OaieEvent {
@@ -1050,10 +985,7 @@ impl PtraceTracer {
                 event_type: EventType::SecurityRelevant,
                 pid: pid.as_raw() as u32,
                 ppid: Some(self.get_ppid(pid)),
-                detail: EventDetail::SecurityRelevant {
-                    syscall: name.into(),
-                    syscall_nr: SYS_PRCTL,
-                },
+                detail: EventDetail::SecurityRelevant { syscall: name.into(), syscall_nr: SYS_PRCTL },
                 hash_prev: String::new(),
             });
         }
@@ -1088,10 +1020,7 @@ impl PtraceTracer {
                 event_type: EventType::SecurityRelevant,
                 pid: pid.as_raw() as u32,
                 ppid: Some(self.get_ppid(pid)),
-                detail: EventDetail::SecurityRelevant {
-                    syscall: name.into(),
-                    syscall_nr: SYS_SOCKET,
-                },
+                detail: EventDetail::SecurityRelevant { syscall: name.into(), syscall_nr: SYS_SOCKET },
                 hash_prev: String::new(),
             });
         }
@@ -1109,22 +1038,13 @@ impl PtraceTracer {
                     // Validate the PID fits in i32 (kernel default pid_max is 2^22,
                     // but configurable up to 2^22 on 64-bit — safely within i32).
                     if new_pid_raw < 0 || new_pid_raw > i32::MAX as i64 {
-                        eprintln!(
-                            "oaie: ptrace getevent returned out-of-range PID: {new_pid_raw}"
-                        );
+                        eprintln!("oaie: ptrace getevent returned out-of-range PID: {new_pid_raw}");
                         return;
                     }
                     let new_pid = new_pid_raw as i32;
                     self.traced_pids.insert(new_pid);
                     self.parent_map.insert(new_pid, pid.as_raw());
-                    self.syscall_states.insert(
-                        new_pid,
-                        SyscallState {
-                            in_entry: true,
-                            syscall_nr: 0,
-                            args: [0; 6],
-                        },
-                    );
+                    self.syscall_states.insert(new_pid, SyscallState { in_entry: true, syscall_nr: 0, args: [0; 6] });
                 }
             }
             // PTRACE_EVENT_EXEC (4) — process called execve successfully.
@@ -1133,32 +1053,17 @@ impl PtraceTracer {
                 let raw = pid.as_raw();
                 let ppid = self.get_ppid(pid);
                 // When a non-leader thread calls execve, the kernel rewrites its
-                // TID to the thread-group leader's PID. Try the reported PID first,
-                // then fall back to searching all pending_execs entries for this
-                // process's children.
-                let pending_opt = self.pending_execs.remove(&raw).or_else(|| {
-                    // The TID was rewritten to the thread-group leader's PID.
-                    // Find the pending exec from a thread in the same group by
-                    // matching ppid, instead of picking an arbitrary entry.
-                    let target_ppid = ppid as i32;
-                    let key = self.pending_execs.keys().copied().find(|&k| {
-                        self.parent_map.get(&k).copied().unwrap_or(-1) == target_ppid
-                    }).or_else(|| {
-                        // Last resort: any pending exec (preserves old behavior).
-                        self.pending_execs.keys().copied().next()
-                    });
-                    key.and_then(|k| self.pending_execs.remove(&k))
-                });
+                // TID to the thread-group leader's PID and reports the FORMER
+                // TID via PTRACE_GETEVENTMSG. Use that as an exact key rather
+                // than guessing — better no argv than another process's argv.
+                let pending_opt = self.pending_execs.remove(&raw).or_else(|| ptrace::getevent(pid).ok().and_then(|old_tid| self.pending_execs.remove(&(old_tid as i32))));
                 if let Some(pending) = pending_opt {
                     self.try_write(OaieEvent {
                         ts_ns: self.elapsed_ns(),
                         event_type: EventType::ProcessExec,
                         pid: raw as u32,
                         ppid: Some(ppid),
-                        detail: EventDetail::Exec {
-                            filename: pending.filename,
-                            argv: pending.argv,
-                        },
+                        detail: EventDetail::Exec { filename: pending.filename, argv: pending.argv },
                         hash_prev: String::new(),
                     });
                 }
@@ -1176,10 +1081,7 @@ impl PtraceTracer {
             event_type: EventType::ProcessExit,
             pid: pid.as_raw() as u32,
             ppid: Some(ppid),
-            detail: EventDetail::Exit {
-                exit_code: code,
-                signal,
-            },
+            detail: EventDetail::Exit { exit_code: code, signal },
             hash_prev: String::new(),
         });
 

@@ -236,13 +236,17 @@ fn mcp_oaie_run_schema_requires_command() {
     assert!(props.contains_key("network"));
 }
 
+use oaie_mcp::tools::McpState;
+
 #[test]
 fn mcp_handle_unknown_tool() {
+    let mut state = McpState::default();
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "nonexistent_tool",
         &serde_json::json!({}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
     assert_eq!(resp.error.unwrap().code, -32601); // METHOD_NOT_FOUND
@@ -250,11 +254,13 @@ fn mcp_handle_unknown_tool() {
 
 #[test]
 fn mcp_handle_run_missing_command() {
+    let mut state = McpState::default();
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "oaie_run",
         &serde_json::json!({}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
     assert_eq!(resp.error.unwrap().code, -32602); // INVALID_PARAMS
@@ -262,11 +268,13 @@ fn mcp_handle_run_missing_command() {
 
 #[test]
 fn mcp_handle_run_invalid_command_type() {
+    let mut state = McpState::default();
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "oaie_run",
         &serde_json::json!({"command": [1, 2]}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
     let err = resp.error.unwrap();
@@ -276,11 +284,13 @@ fn mcp_handle_run_invalid_command_type() {
 
 #[test]
 fn mcp_handle_verify_missing_run_id() {
+    let mut state = McpState::default();
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "oaie_verify",
         &serde_json::json!({}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
     assert_eq!(resp.error.unwrap().code, -32602);
@@ -288,32 +298,39 @@ fn mcp_handle_verify_missing_run_id() {
 
 #[test]
 fn mcp_handle_read_output_missing_params() {
-    // Missing both params.
+    let mut state = McpState::default();
+    // Missing both params — run_id extraction fails before check_run_origin.
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "oaie_read_output",
         &serde_json::json!({}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
 
-    // Missing artifact_name.
+    // run_id present but not in created_runs (empty state) — the origin
+    // check fires before the artifact_name check, so this still surfaces
+    // as INVALID_PARAMS (just with a different message).
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "oaie_read_output",
         &serde_json::json!({"run_id": "abc"}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
 }
 
 #[test]
 fn mcp_handle_run_empty_command() {
+    let mut state = McpState::default();
     let resp = oaie_mcp::tools::handle_tool_call(
         Some(serde_json::json!(1)),
         "oaie_run",
         &serde_json::json!({"command": []}),
         "/tmp",
+        &mut state,
     );
     assert!(resp.error.is_some());
     let err = resp.error.unwrap();
@@ -323,6 +340,73 @@ fn mcp_handle_run_empty_command() {
         "error should mention empty: {}",
         err.message
     );
+}
+
+#[test]
+fn mcp_run_origin_gates_read_and_verify() {
+    // The cross-trust-boundary fix: read_output and verify reject run_ids
+    // that this connection's oaie_run did not create. An LLM client that
+    // guesses the operator's most-recent run_id (or uses "last") gets
+    // INVALID_PARAMS before any DB query happens.
+    let mut state = McpState::default();
+
+    // "last" is always rejected — it resolves to the operator's CLI run.
+    let resp = oaie_mcp::tools::handle_tool_call(
+        Some(serde_json::json!(1)),
+        "oaie_read_output",
+        &serde_json::json!({"run_id": "last", "artifact_name": "stdout"}),
+        "/tmp",
+        &mut state,
+    );
+    let err = resp.error.expect("'last' should be rejected");
+    assert_eq!(err.code, -32602);
+    assert!(err.message.contains("last"), "msg: {}", err.message);
+
+    // A plausible-looking UUID that we never inserted — origin check fails.
+    let resp = oaie_mcp::tools::handle_tool_call(
+        Some(serde_json::json!(2)),
+        "oaie_verify",
+        &serde_json::json!({"run_id": "019d0000-1111-7222-8333-444455556666"}),
+        "/tmp",
+        &mut state,
+    );
+    assert!(resp.error.is_some(), "foreign run_id should be rejected");
+
+    // Now seed the state as oaie_run would on success, and confirm the
+    // gate opens. The DB query will then fail (no such run in /tmp's
+    // store) but that's a DIFFERENT failure — the origin gate passed.
+    state.created_runs.insert("019d0000-1111-7222-8333-444455556666".into());
+    let resp = oaie_mcp::tools::handle_tool_call(
+        Some(serde_json::json!(3)),
+        "oaie_verify",
+        &serde_json::json!({"run_id": "019d0000-1111-7222-8333-444455556666"}),
+        "/tmp",
+        &mut state,
+    );
+    // Still an error (the run doesn't exist on disk) but the message is
+    // about the missing run, not about origin — proves we got past the gate.
+    let err = resp.error.expect("nonexistent run should still error");
+    assert!(
+        !err.message.to_lowercase().contains("connection"),
+        "should be a store error, not an origin error: {}",
+        err.message
+    );
+}
+
+#[test]
+fn mcp_session_stop_returns_method_not_found() {
+    // No MCP tool creates sessions, so there's nothing the MCP caller
+    // could legitimately stop. Dispatch returns METHOD_NOT_FOUND.
+    let mut state = McpState::default();
+    let resp = oaie_mcp::tools::handle_tool_call(
+        Some(serde_json::json!(1)),
+        "oaie_session_stop",
+        &serde_json::json!({"session_id": "anything"}),
+        "/tmp",
+        &mut state,
+    );
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, -32601); // METHOD_NOT_FOUND
 }
 
 #[test]

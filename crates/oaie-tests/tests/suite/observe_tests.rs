@@ -571,7 +571,10 @@ fn summarizer_tracks_network_attempts() {
     let _ = chain.append(&mut e);
     events.push(e);
 
-    let mut e = make_net_connect_event(1, "10.0.0.1:443", -111); // ECONNREFUSED
+    // ECONNREFUSED. The ptrace tracer encodes result as `(-ret) as i32`
+    // — positive errno, not the kernel's negative — and -1 is reserved
+    // for "not captured" (eBPF sys_enter); see event.rs result doc.
+    let mut e = make_net_connect_event(1, "10.0.0.1:443", 111);
     let _ = chain.append(&mut e);
     events.push(e);
 
@@ -632,7 +635,10 @@ fn full_observe_pipeline() {
         .write_event(make_file_open_event(2, "/in/data.bin", 0, 0))
         .unwrap();
     writer
-        .write_event(make_net_connect_event(1, "93.184.216.34:80", -1))
+        // -1 is the eBPF "not captured" sentinel (buckets as success).
+        // Use a real errno (ECONNREFUSED=111, positive per the ptrace
+        // tracer's encoding) so this lands in net_denied.
+        .write_event(make_net_connect_event(1, "93.184.216.34:80", 111))
         .unwrap();
     writer.write_event(make_run_end_event(0)).unwrap();
     let result = writer.finalize().unwrap();
@@ -898,7 +904,8 @@ fn trace_section_with_events_shows_observed_accesses() {
         .write_event(make_file_open_event(1, "/out/result.json", 1, 0))
         .unwrap();
     writer
-        .write_event(make_net_connect_event(1, "10.0.0.1:443", -111))
+        // Positive errno per ptrace encoding (was -111, never produced).
+        .write_event(make_net_connect_event(1, "10.0.0.1:443", 111))
         .unwrap();
     writer.write_event(make_run_end_event(0)).unwrap();
     writer.finalize().unwrap();

@@ -122,9 +122,24 @@ pub fn verify_run(store: &OaieStore, run_id: &RunId) -> Result<VerifyReport> {
     }
 
     // Check 12: Manifest signature.
+    // The trusted-key list is the trust anchor: without it, the only
+    // public key verify_signature() can see is the one inside
+    // signature.toml — i.e., the file under verification. Empty list
+    // → Skip (not Pass). See SigningConfig.trusted_public_keys doc.
+    let trusted_keys: &[String] = store
+        .signing
+        .as_ref()
+        .map(|s| s.trusted_public_keys.as_slice())
+        .unwrap_or(&[]);
     let sig_path = run_dir.join("signature.toml");
     if sig_path.exists() {
-        verify_manifest_signature(&sig_path, &manifest_path, store.hash_algorithm, &mut checks);
+        verify_manifest_signature(
+            &sig_path,
+            &manifest_path,
+            store.hash_algorithm,
+            trusted_keys,
+            &mut checks,
+        );
     } else {
         checks.push(CheckResult {
             check: CheckKind::ManifestSignature,
@@ -848,10 +863,15 @@ fn hash_bytes(algo: HashAlgorithm, data: &[u8]) -> String {
 /// 2. Parse signature.toml → `SignatureInfo`.
 /// 3. Check computed hash matches claimed manifest_hash.
 /// 4. Verify Ed25519 signature.
+/// 5. Check `sig.public_key` is in `trusted_keys` — the trust anchor.
+///    Step 5 is what makes this verification mean something: steps 3-4
+///    only prove that SOME key signed it, and that key came from inside
+///    the file we're verifying.
 fn verify_manifest_signature(
     sig_path: &std::path::Path,
     manifest_path: &std::path::Path,
     hash_algo: HashAlgorithm,
+    trusted_keys: &[String],
     checks: &mut Vec<CheckResult>,
 ) {
     // Read signature.toml.
@@ -892,21 +912,61 @@ fn verify_manifest_signature(
         }
     };
 
-    // Verify the signature.
-    match crate::signing::verify_signature(&manifest_bytes, &sig, hash_algo) {
-        Ok(true) => {
-            let pub_short = if sig.public_key.len() >= 12 {
-                &sig.public_key[..12]
-            } else {
-                &sig.public_key
-            };
+    // Verify the signature against the trust list.
+    use crate::signing::VerifyOutcome;
+    let pub_short = if sig.public_key.len() >= 12 {
+        &sig.public_key[..12]
+    } else {
+        &sig.public_key
+    };
+    match crate::signing::verify_signature(&manifest_bytes, &sig, hash_algo, trusted_keys) {
+        Ok(VerifyOutcome::Trusted) => {
             checks.push(CheckResult {
                 check: CheckKind::ManifestSignature,
                 status: CheckStatus::Pass,
-                detail: Some(format!("Signed by {} ({pub_short}..)", sig.signer_label)),
+                detail: Some(format!(
+                    "Signed by {} ({pub_short}.., in trusted_public_keys)",
+                    sig.signer_label
+                )),
             });
         }
-        Ok(false) => {
+        Ok(VerifyOutcome::UntrustedKey) => {
+            // Signature is cryptographically valid but the key isn't
+            // in our trust store. This is exactly the self-attesting-
+            // signature attack: anyone can generate a key, sign a
+            // manifest, and embed both in signature.toml. The math
+            // checks out; the trust does not. Fail, not Skip — the
+            // signer made a positive claim of authenticity, and that
+            // claim is unverified.
+            checks.push(CheckResult {
+                check: CheckKind::ManifestSignature,
+                status: CheckStatus::Fail,
+                detail: Some(format!(
+                    "Signature valid but public key {pub_short}.. NOT in \
+                     trusted_public_keys (signer claims '{}'). Add the key \
+                     to config.toml [signing].trusted_public_keys if you \
+                     trust this signer — or this is a self-attesting forge.",
+                    sig.signer_label
+                )),
+            });
+        }
+        Ok(VerifyOutcome::NoTrustStore) => {
+            // Signature is cryptographically valid but we have no
+            // trust list to check against. Skip, not Pass: the operator
+            // must opt in to trust by populating the list.
+            checks.push(CheckResult {
+                check: CheckKind::ManifestSignature,
+                status: CheckStatus::Skip,
+                detail: Some(format!(
+                    "Signature cryptographically valid (signer claims '{}', \
+                     key {pub_short}..) but config.toml has no \
+                     [signing].trusted_public_keys — cannot establish trust. \
+                     The signature could be self-attesting.",
+                    sig.signer_label
+                )),
+            });
+        }
+        Ok(VerifyOutcome::BadSignature) => {
             checks.push(CheckResult {
                 check: CheckKind::ManifestSignature,
                 status: CheckStatus::Fail,

@@ -310,6 +310,12 @@ pub struct PolicyLimits {
     /// Maximum file size (RLIMIT_FSIZE). Human-readable: "1G", "256M".
     #[serde(default = "default_max_fsize")]
     pub max_fsize: String,
+    /// Maximum open files (RLIMIT_NOFILE soft limit; hard is 4× this).
+    /// Was the one rlimit NOT policy-configurable, which meant the
+    /// workload most likely to need more (JVM on agent-analyze, opening
+    /// hundreds of jars) was stuck at 1024.
+    #[serde(default = "default_max_files")]
+    pub max_files: u64,
     /// Allow `memfd_create()` and `execveat()` syscalls (default: false).
     ///
     /// Needed for JIT compilers and language runtimes that use fileless
@@ -341,6 +347,7 @@ impl Default for PolicyLimits {
             max_time: default_max_time(),
             max_pids: default_max_pids(),
             max_fsize: default_max_fsize(),
+            max_files: default_max_files(),
             allow_memfd: false,
             capabilities: vec![],
             cpu_quota: None,
@@ -352,6 +359,7 @@ fn default_max_memory() -> String { "512M".into() }
 fn default_max_time() -> String { "5m".into() }
 fn default_max_pids() -> u32 { 64 }
 fn default_max_fsize() -> String { "1G".into() }
+fn default_max_files() -> u64 { 1024 }
 
 impl Policy {
     /// Load a policy from a TOML file, validate it, and return.
@@ -523,10 +531,10 @@ impl Policy {
         vec![
             ("safe", "No network, 512M memory, 5m timeout, 64 PIDs"),
             ("net", "Network allowed, 512M memory, 5m timeout, 64 PIDs"),
-            ("agent-safe", "Agent: no network, 256M memory, 2m timeout, 64 PIDs"),
-            ("agent-net", "Agent: network allowed, 512M memory, 5m timeout, 64 PIDs"),
+            ("agent-safe", "Agent: no network, 1G AS, 2m timeout, 512 PIDs"),
+            ("agent-net", "Agent: network allowed, 512M memory, 5m timeout, 256 PIDs"),
             ("agent-build", "Agent: network, 2G memory, 10m timeout, 256 PIDs, memfd"),
-            ("agent-analyze", "Agent: no network, 1G memory, 15m timeout, 128 PIDs, memfd"),
+            ("agent-analyze", "Agent: no network, 12G AS (JVM-sized), 45m ceiling, 128 PIDs, memfd"),
             ("anthropic", "Allowlist: api.anthropic.com:443 only"),
             ("openai", "Allowlist: api.openai.com:443 only"),
             ("llm", "Allowlist: anthropic + openai + Google generativelanguage API"),
@@ -539,16 +547,33 @@ impl Policy {
 
     /// Agent preset: no network, tight limits. For running untrusted
     /// commands from AI agents where safety is paramount.
+    ///
+    /// `max_memory` is RLIMIT_AS (virtual address space), not RSS — many
+    /// real workloads VmPeak well above their RSS just loading shared
+    /// libraries the kernel never faults in. 1G is enough headroom that
+    /// pthread_create's stack mmap doesn't ENOMEM during library setup.
+    ///
+    /// `max_pids` is RLIMIT_NPROC, which is keyed by kuid (host UID),
+    /// not in-namespace UID — `write_uid_map` writes "0 {host} 1", so
+    /// every jail's UID-0 IS the operator for accounting purposes. The
+    /// counter is shared across the operator's whole process tree, so
+    /// the limit must clear the operator's working set plus a thread
+    /// burst from one job (CPU-fan-out tooling is common). 512 clears
+    /// that with headroom while remaining a fork-bomb defense: a hostile
+    /// binary in ONE jail tops out at ~512+baseline (each thread is
+    /// ~8KB kernel stack → 4MB total) before its own clones start
+    /// failing — annoying for parallel jails but not host-OOM territory.
     pub fn preset_agent_safe() -> Self {
         Self {
             name: Some("agent-safe".into()),
             defaults: PolicyDefaults::default(),
             mounts: PolicyMounts::default(),
             limits: PolicyLimits {
-                max_memory: "256M".into(),
+                max_memory: "1G".into(),
                 max_time: "2m".into(),
-                max_pids: 64,
+                max_pids: 512,
                 max_fsize: "256M".into(),
+                max_files: 1024,
                 allow_memfd: false,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -569,8 +594,12 @@ impl Policy {
             limits: PolicyLimits {
                 max_memory: "512M".into(),
                 max_time: "5m".into(),
-                max_pids: 64,
+                // Same kuid-keyed counter as agent-safe — see comment
+                // there. Lower than agent-safe because net-enabled jobs
+                // shouldn't be doing CPU-bound thread-per-core work.
+                max_pids: 256,
                 max_fsize: "256M".into(),
+                max_files: 1024,
                 allow_memfd: false,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -593,6 +622,9 @@ impl Policy {
                 max_time: "10m".into(),
                 max_pids: 256,
                 max_fsize: "1G".into(),
+                // Build tools: rustc with incremental, cargo with many
+                // deps, node_modules — all fd-hungry. 4096 with 16384 hard.
+                max_files: 4096,
                 allow_memfd: true,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -602,16 +634,31 @@ impl Policy {
 
     /// Agent preset: no network, generous time/memory for analysis tasks.
     /// Allows memfd for runtimes that need fileless execution.
+    ///
+    /// `max_memory` here is RLIMIT_AS — virtual address space, not RSS.
+    /// JVM-style workloads can VmPeak well above their RSS from upfront
+    /// reservations (heap, compressed class space, code cache, thread
+    /// stacks, mmap'd jars) plus metaspace growth. 12G is generous so
+    /// the limit isn't the binding constraint; aggregate host RAM is
+    /// controlled by the caller's concurrency, not per-process AS.
     pub fn preset_agent_analyze() -> Self {
         Self {
             name: Some("agent-analyze".into()),
             defaults: PolicyDefaults::default(),
             mounts: PolicyMounts::default(),
             limits: PolicyLimits {
-                max_memory: "1G".into(),
-                max_time: "15m".into(),
+                max_memory: "12G".into(),
+                // Ceiling for long-running analysis (e.g. type propagation
+                // on a large binary is superlinear). The caller is
+                // expected to pass its own tighter timeout; this is just
+                // the upper bound oaie itself enforces.
+                max_time: "45m".into(),
                 max_pids: 128,
                 max_fsize: "512M".into(),
+                // JVM-style classpaths can hold hundreds of jars open as
+                // fds while mmap'd; plus the analysis target, project
+                // database, and temp files. 1024 is too tight here.
+                max_files: 4096,
                 allow_memfd: true,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -705,6 +752,7 @@ impl Policy {
                 max_time: "10m".into(),
                 max_pids: 128,
                 max_fsize: "1G".into(),
+                max_files: 1024,
                 allow_memfd: true,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -735,6 +783,7 @@ impl Policy {
                 max_time: "1m".into(),
                 max_pids: 32,
                 max_fsize: "256M".into(),
+                max_files: 256,
                 allow_memfd: false,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -754,6 +803,7 @@ impl Policy {
                 max_time: "10m".into(),
                 max_pids: 128,
                 max_fsize: "1G".into(),
+                max_files: 1024,
                 allow_memfd: true,
                 capabilities: vec![],
                 cpu_quota: None,
@@ -800,7 +850,9 @@ pub fn default_deny_paths() -> Vec<String> {
 /// Expand `~` at the start of a path to `$HOME`.
 ///
 /// Uses `std::env::var("HOME")` — no `dirs` crate needed. Returns the
-/// path unchanged if it doesn't start with `~` or `HOME` is not set.
+/// path unchanged if it doesn't start with `~`. Panics if the path starts
+/// with `~` but `HOME` is not set — failing closed, since silently
+/// returning the literal `~/.ssh` would make deny-list entries no-ops.
 ///
 /// Note: `~user` syntax (e.g. `~bob/data`) is intentionally not supported
 /// and is rejected with an error. OAIE runs as a single user and policy
@@ -810,10 +862,12 @@ pub fn expand_tilde(path: &str) -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join(rest);
         }
+        panic!("expand_tilde: HOME is not set; cannot expand {path:?} (set HOME or use an absolute path)");
     } else if path == "~" {
         if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home);
         }
+        panic!("expand_tilde: HOME is not set; cannot expand \"~\" (set HOME or use an absolute path)");
     }
     PathBuf::from(path)
 }

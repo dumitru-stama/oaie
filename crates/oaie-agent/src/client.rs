@@ -211,6 +211,9 @@ impl OaieClient {
             timeout: None,
             ro: &[],
             rw: &[],
+            bind_ro: &[],
+            bind_rw: &[],
+            bind_exec: &[],
             no_auto_mount: true,
             command: &cmd,
             input: None,
@@ -223,6 +226,13 @@ impl OaieClient {
 
         let config = SessionConfig {
             budget: budget.unwrap_or_default(),
+            // OaieClient is the agent-facing API (MCP / LLM tool calls). The
+            // command IS the AI-supplied agent program — it MUST run inside
+            // the sandbox, never on the host. SessionConfig::default() gives
+            // AgentSandboxMode::Host (the operator-CLI default), which would
+            // execute the AI's chosen binary at supervisor UID with full
+            // host filesystem visibility.
+            agent_sandbox: oaie_core::session::AgentSandboxMode::Sandboxed,
             ..SessionConfig::default()
         };
 
@@ -232,7 +242,9 @@ impl OaieClient {
         // Run in the current thread (MCP uses background thread externally).
         // We can't move SessionRunner across threads due to OaieDb trait objects.
         // Caller should spawn their own thread if async operation is needed.
-        let _ = session.run(&cmd, true);
+        // Propagate the run result so the MCP layer can report a real status
+        // instead of an unconditional "completed".
+        session.run(&cmd, true)?;
 
         Ok(session_id)
     }
@@ -278,7 +290,14 @@ impl OaieClient {
             timeout,
             ro: &job.extra_ro,
             rw: &job.extra_rw,
-            no_auto_mount: false,
+            bind_ro: &[],
+            bind_rw: &[],
+            bind_exec: &[],
+            // OaieClient is the agent-facing API: argv is chosen by an
+            // untrusted caller (MCP / LLM tool calls), so the auto_mount
+            // heuristic must NOT be allowed to derive host bind-mounts from
+            // it. Matches the sibling PolicyInput at session_run / session.rs.
+            no_auto_mount: true,
             command: &job.command,
             input: job.inputs.as_ref(),
             out: job.outputs.as_ref(),

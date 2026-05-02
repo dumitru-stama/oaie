@@ -54,20 +54,31 @@ pub fn create_cgroup(run_id: &str, limits: &CgroupLimits, caller_uid: u32) -> Re
     // Create the run-specific cgroup.
     let scope_name = format!("run-{run_id}");
     let scope_path = root.join(&scope_name);
-    fs::create_dir_all(&scope_path)
+    fs::create_dir(&scope_path)
         .map_err(|e| format!("failed to create cgroup {}: {e}", scope_path.display()))?;
 
-    // Write limits.
+    // Write limits. Propagate failures so callers do not believe a security
+    // control was applied when it was not (CWE-754).
     if let Some(memory_max) = limits.memory_max {
-        let _ = fs::write(scope_path.join("memory.max"), format!("{memory_max}"));
-        // Disable swap to prevent masking memory pressure.
+        fs::write(scope_path.join("memory.max"), format!("{memory_max}")).map_err(|e| {
+            let _ = fs::remove_dir(&scope_path);
+            format!("failed to write memory.max: {e}")
+        })?;
+        // Disable swap to prevent masking memory pressure (best-effort; the
+        // swap controller may be unavailable).
         let _ = fs::write(scope_path.join("memory.swap.max"), "0");
     }
     if let Some(pids_max) = limits.pids_max {
-        let _ = fs::write(scope_path.join("pids.max"), format!("{pids_max}"));
+        fs::write(scope_path.join("pids.max"), format!("{pids_max}")).map_err(|e| {
+            let _ = fs::remove_dir(&scope_path);
+            format!("failed to write pids.max: {e}")
+        })?;
     }
     if let (Some(quota), Some(period)) = (limits.cpu_quota_us, limits.cpu_period_us) {
-        let _ = fs::write(scope_path.join("cpu.max"), format!("{quota} {period}"));
+        fs::write(scope_path.join("cpu.max"), format!("{quota} {period}")).map_err(|e| {
+            let _ = fs::remove_dir(&scope_path);
+            format!("failed to write cpu.max: {e}")
+        })?;
     }
 
     // Chown cgroup.procs to the caller's UID so the unprivileged OAIE process
@@ -91,7 +102,7 @@ pub fn create_cgroup(run_id: &str, limits: &CgroupLimits, caller_uid: u32) -> Re
 /// Clean up (remove) a cgroup scope.
 ///
 /// The cgroup must be empty (no processes) for rmdir to succeed.
-pub fn cleanup_cgroup(path: &Path) -> Result<(), String> {
+pub fn cleanup_cgroup(path: &Path, caller_uid: u32) -> Result<(), String> {
     if !path.exists() {
         return Ok(()); // Already gone.
     }
@@ -101,6 +112,18 @@ pub fn cleanup_cgroup(path: &Path) -> Result<(), String> {
         return Err(format!(
             "refusing to remove cgroup outside {OAIE_CGROUP_ROOT}: {}",
             path.display()
+        ));
+    }
+
+    // Verify ownership: cgroup.procs was chowned to the creator's UID by
+    // create_cgroup; reject cleanup from a different UID.
+    use std::os::unix::fs::MetadataExt;
+    let procs_uid = fs::metadata(path.join("cgroup.procs"))
+        .map_err(|e| format!("cannot stat cgroup.procs: {e}"))?
+        .uid();
+    if procs_uid != caller_uid {
+        return Err(format!(
+            "cgroup owned by uid {procs_uid}, caller is uid {caller_uid}"
         ));
     }
 

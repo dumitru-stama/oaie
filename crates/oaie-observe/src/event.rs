@@ -91,14 +91,23 @@ pub enum EventDetail {
         path: String,
         /// Open flags (O_RDONLY=0, O_WRONLY=1, O_RDWR=2, etc.).
         flags: u32,
-        /// 0 = success, otherwise the errno value.
+        /// 0 = success, >0 = errno, -1 = not captured.
+        ///
+        /// The -1 case is the eBPF backend (ebpf_tracer.rs) which hooks
+        /// `sys_enter_*` tracepoints — the syscall hasn't returned yet,
+        /// so the kernel return value is unknowable. The ptrace backend
+        /// reads the actual return register at syscall-exit-stop and
+        /// always populates 0 or errno. Consumers (summary.rs) MUST
+        /// check `> 0`, not `!= 0`, to bucket failures, so that the
+        /// eBPF `-1` falls through to the presume-success path instead
+        /// of colliding with ptrace's "actually succeeded".
         result: i32,
     },
     /// A file was stat'd.
     FileStat {
         /// Filesystem path that was stat'd.
         path: String,
-        /// 0 = success, otherwise the errno value.
+        /// 0 = success, >0 = errno, -1 = not captured (see FileAccess.result).
         result: i32,
     },
     /// A network connect was attempted.
@@ -107,7 +116,7 @@ pub enum EventDetail {
         family: String,
         /// Address and port: "93.184.216.34:80" or "/var/run/sock".
         address: String,
-        /// 0 = success, otherwise the errno value.
+        /// 0 = success, >0 = errno, -1 = not captured (see FileAccess.result).
         result: i32,
     },
     /// A DNS query was observed (sendto to UDP port 53).

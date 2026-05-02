@@ -60,6 +60,17 @@ fn run() -> io::Result<()> {
     // Mount essential filesystems.
     mount_filesystems()?;
 
+    // SECURITY: harden PID 1 against FD theft from the (later) child.
+    // PR_SET_DUMPABLE=0 blocks ptrace/pidfd_getfd from same-UID processes;
+    // combined with the UID drop in pre_exec (which removes CAP_SYS_PTRACE),
+    // this prevents the tool from stealing the connected vsock FD.
+    // chmod/chown so the dropped-UID tool can still write its work dirs.
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+        libc::chmod(c"/tmp".as_ptr(), 0o1777);
+        libc::chown(c"/out".as_ptr(), 65534, 65534);
+    }
+
     // Connect to host via vsock.
     let mut stream = vsock_connect(HOST_CID, HOST_PORT)?;
     eprintln!("oaie-guest: connected to host via vsock");
@@ -167,7 +178,7 @@ fn mount_filesystems() -> io::Result<()> {
             let err = io::Error::last_os_error();
             // Don't fail on already-mounted.
             if err.raw_os_error() != Some(libc::EBUSY) {
-                eprintln!("oaie-guest: warning: mount {target} failed: {err}");
+                return Err(io::Error::other(format!("mount {target} failed: {err}")));
             }
         }
     }
@@ -405,7 +416,23 @@ fn handle_run_job(stream: &mut UnixStream, msg: &serde_json::Value) -> io::Resul
                 return Err(io::Error::other("failed to set RLIMIT_NPROC"));
             }
 
-            // 3. Install seccomp filter blocking AF_VSOCK socket creation.
+            // 3. SECURITY: drop to unprivileged UID. This is the primary
+            // defense — without root, the tool loses CAP_SYS_PTRACE (so
+            // PR_SET_DUMPABLE=0 on PID 1 actually blocks pidfd_getfd/ptrace),
+            // CAP_MKNOD (so it cannot recreate /dev/vsock), and CAP_NET_ADMIN.
+            // Order: clear supplementary groups, then GID, then UID (last,
+            // since dropping UID drops CAP_SETGID).
+            if libc::setgroups(0, std::ptr::null()) != 0 {
+                return Err(io::Error::other("failed to clear supplementary groups"));
+            }
+            if libc::setresgid(65534, 65534, 65534) != 0 {
+                return Err(io::Error::other("failed to setresgid(nobody)"));
+            }
+            if libc::setresuid(65534, 65534, 65534) != 0 {
+                return Err(io::Error::other("failed to setresuid(nobody)"));
+            }
+
+            // 4. Install seccomp filter blocking AF_VSOCK socket creation.
             // This prevents the tool from creating vsock sockets to talk
             // to the host directly, bypassing the guest agent.
             // SECURITY: seccomp failure is fatal — without this filter, the
@@ -590,6 +617,7 @@ fn install_seccomp_vsock_filter() -> io::Result<()> {
     // BPF instruction building blocks.
     const BPF_LD_W_ABS: u16 = 0x20;  // BPF_LD | BPF_W | BPF_ABS
     const BPF_JMP_JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+    const BPF_JMP_JGE_K: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
     const BPF_RET_K: u16 = 0x06;     // BPF_RET | BPF_K
 
     const SECCOMP_RET_ALLOW: u32 = 0x7FFF_0000;
@@ -600,28 +628,56 @@ fn install_seccomp_vsock_filter() -> io::Result<()> {
     const OFF_NR: u32 = 0;
     const OFF_ARGS_0: u32 = 16; // low 32 bits of args[0]
 
-    const SYS_SOCKET: u32 = 41; // x86_64
-    const AF_VSOCK: u32 = 40;
+    const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 
-    // BPF program: 8 instructions.
+    // x86_64 syscall numbers.
+    const SYS_SOCKET: u32 = 41;
+    const SYS_PTRACE: u32 = 101;
+    const SYS_IO_URING_SETUP: u32 = 425;
+    const SYS_IO_URING_ENTER: u32 = 426;
+    const SYS_IO_URING_REGISTER: u32 = 427;
+    const SYS_PIDFD_OPEN: u32 = 434;
+    const SYS_PIDFD_GETFD: u32 = 438;
+    const AF_VSOCK: u32 = 40;
+    const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
+    // BPF program: 16 instructions.
     //
-    // [0] Load arch
-    // [1] If arch != x86_64 → allow [7]
-    // [2] Load syscall nr
-    // [3] If nr != SYS_socket → allow [7]
-    // [4] Load arg0 (domain)
-    // [5] If arg0 == AF_VSOCK → errno [6], else → allow [7]
-    // [6] Return ERRNO(EACCES)
-    // [7] Return ALLOW
-    let filter: [SockFilter; 8] = [
-        SockFilter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: OFF_ARCH },
-        SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: 5, k: AUDIT_ARCH_X86_64 },
-        SockFilter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: OFF_NR },
-        SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: 3, k: SYS_SOCKET },
-        SockFilter { code: BPF_LD_W_ABS, jt: 0, jf: 0, k: OFF_ARGS_0 },
-        SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: 1, k: AF_VSOCK },
-        SockFilter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ERRNO | (libc::EACCES as u32) },
-        SockFilter { code: BPF_RET_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW },
+    // [0]  Load arch
+    // [1]  arch != x86_64 → KILL [14]   (fail-closed: blocks i386 socketcall)
+    // [2]  Load syscall nr
+    // [3]  nr >= 0x40000000 → KILL [14] (x32 ABI shares AUDIT_ARCH_X86_64;
+    //                                    without this, nr|__X32_SYSCALL_BIT
+    //                                    bypasses every JEQ below)
+    // [4]  io_uring_setup    → ERRNO [13]  (IORING_OP_SOCKET bypass, kernel ≥5.19)
+    // [5]  io_uring_enter    → ERRNO [13]
+    // [6]  io_uring_register → ERRNO [13]
+    // [7]  pidfd_open        → ERRNO [13]  (FD theft from PID 1)
+    // [8]  pidfd_getfd       → ERRNO [13]
+    // [9]  ptrace            → ERRNO [13]  (PTRACE_ATTACH PID 1)
+    // [10] socket? else → ALLOW [15]
+    // [11] Load arg0 (domain)
+    // [12] arg0 == AF_VSOCK → ERRNO [13], else → ALLOW [15]
+    // [13] RET ERRNO(EACCES)
+    // [14] RET KILL_PROCESS
+    // [15] RET ALLOW
+    let filter: [SockFilter; 16] = [
+        SockFilter { code: BPF_LD_W_ABS,  jt: 0, jf: 0,  k: OFF_ARCH },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: 12, k: AUDIT_ARCH_X86_64 },
+        SockFilter { code: BPF_LD_W_ABS,  jt: 0, jf: 0,  k: OFF_NR },
+        SockFilter { code: BPF_JMP_JGE_K, jt: 10, jf: 0, k: X32_SYSCALL_BIT },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 8, jf: 0,  k: SYS_IO_URING_SETUP },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 7, jf: 0,  k: SYS_IO_URING_ENTER },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 6, jf: 0,  k: SYS_IO_URING_REGISTER },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 5, jf: 0,  k: SYS_PIDFD_OPEN },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 4, jf: 0,  k: SYS_PIDFD_GETFD },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 3, jf: 0,  k: SYS_PTRACE },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: 4,  k: SYS_SOCKET },
+        SockFilter { code: BPF_LD_W_ABS,  jt: 0, jf: 0,  k: OFF_ARGS_0 },
+        SockFilter { code: BPF_JMP_JEQ_K, jt: 0, jf: 2,  k: AF_VSOCK },
+        SockFilter { code: BPF_RET_K,     jt: 0, jf: 0,  k: SECCOMP_RET_ERRNO | (libc::EACCES as u32) },
+        SockFilter { code: BPF_RET_K,     jt: 0, jf: 0,  k: SECCOMP_RET_KILL_PROCESS },
+        SockFilter { code: BPF_RET_K,     jt: 0, jf: 0,  k: SECCOMP_RET_ALLOW },
     ];
 
     let prog = SockFprog {

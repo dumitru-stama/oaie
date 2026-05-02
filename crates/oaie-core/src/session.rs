@@ -114,7 +114,15 @@ impl Default for SessionBudget {
 }
 
 /// Session configuration (from CLI flags + policy).
+///
+/// `deny_unknown_fields`: this struct carries `agent_sandbox`, the field
+/// that decides whether an AI agent runs at supervisor UID. Without
+/// deny_unknown_fields, a typo'd TOML key (`agent_sandbox_mode = ...`,
+/// `agentSandbox = ...`) would be silently ignored and fall through to
+/// the safe default — but the operator wouldn't know their config didn't
+/// take. Better to fail at parse.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionConfig {
     /// Optional human-readable session name.
     pub name: Option<String>,
@@ -191,12 +199,43 @@ impl ToolFilter {
     ///
     /// Deny always takes precedence. If allow list is non-empty, command must
     /// match at least one allow pattern. Empty filter allows everything.
+    ///
+    /// WHAT THIS DOES AND DOESN'T GATE
+    ///
+    /// This is an argv[0] gate, not an execution gate. It checks
+    /// `basename(command[0])` against allow/deny patterns. It does NOT
+    /// inspect what the tool does once it runs.
+    ///
+    /// Consequence: any allowed tool that can fork+exec bypasses the deny
+    /// list for what runs INSIDE its process tree. With allow=["sh"] and
+    /// deny=["curl"], `["sh", "-c", "curl ..."]` passes — sh is allowed,
+    /// what sh runs is invisible to this check. With allow=["python3"] and
+    /// deny=["curl"], `["python3", "-c", "import os; os.system('curl')"]`
+    /// passes for the same reason.
+    ///
+    /// The deny list is therefore only effective when the allow list
+    /// excludes everything that can fork+exec arbitrary commands — which
+    /// excludes shells, interpreters, `env`, `timeout`, `nice`, `xargs`,
+    /// `find -exec`, and most build tools. That's a narrow allowlist.
+    ///
+    /// Where this IS useful: an allowlist of single-purpose tools that
+    /// don't fork (`["jq", "sha256sum", "file"]`). The agent can run those
+    /// and nothing else; the check holds because none of them exec argv.
+    /// The deny list adds nothing in that case (everything not allowed is
+    /// already denied) — drop it, use a tight allowlist alone.
+    ///
+    /// Where this is NOT a security boundary: any deployment that allows
+    /// `sh` or any interpreter. The filter then expresses INTENT (the
+    /// session author wanted to deny curl) without expressing a CONSTRAINT
+    /// (curl runs anyway). That's documentation, not enforcement.
+    ///
+    /// This filter gates exec of argv[0]; the bypass is "any allowed tool
+    /// execs the denied one". Don't gate sandbox-level capabilities (e.g.
+    /// network access) on argv[0] — the bypass there is a full capability
+    /// grant.
     pub fn is_allowed(&self, command: &str) -> bool {
         // Extract basename for matching.
-        let basename = std::path::Path::new(command)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(command);
+        let basename = std::path::Path::new(command).file_name().and_then(|n| n.to_str()).unwrap_or(command);
 
         // Deny takes precedence.
         for pattern in &self.deny {
@@ -254,22 +293,38 @@ fn glob_match(pattern: &str, text: &str) -> bool {
         }
     }
     // If pattern ends with *, any trailing text is ok.
-    // If not, we must have consumed all text.
+    // If not, the last non-empty part must anchor at the end of text.
+    // The loop above used find() (first occurrence); when the part
+    // appears more than once, pos lands mid-string. ends_with() is the
+    // correct end-anchor check.
     if pattern.ends_with('*') {
         true
     } else {
-        pos == text.len()
+        match parts.iter().rev().find(|p| !p.is_empty()) {
+            Some(last) => text.ends_with(last),
+            None => true,
+        }
     }
 }
 
 /// Whether the agent process runs sandboxed or on the host.
+///
+/// **Default is `Sandboxed`.** The dangerous mode (running an AI-supplied
+/// agent at supervisor UID with full host filesystem visibility) must be
+/// an explicit operator opt-in, not a silent fallback for any code path
+/// that builds `SessionConfig` via `..SessionConfig::default()` or any
+/// session.toml that misspells the field name (serde silently ignores
+/// unknown fields). The safe mode is the one you get when you forget.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSandboxMode {
-    /// Agent runs directly on the host (default, tools still sandboxed).
-    #[default]
+    /// Agent runs directly on the host (tools still sandboxed). Operator
+    /// opt-in only — for trusted local agents the operator wrote, never
+    /// for AI-supplied programs. Reachable via `oaie session start
+    /// --unsandboxed-agent`.
     Host,
-    /// Agent runs inside a namespace sandbox.
+    /// Agent runs inside a namespace sandbox. The default.
+    #[default]
     Sandboxed,
 }
 
@@ -529,9 +584,7 @@ impl ContainmentProfile {
             "cloud" => Ok(Self::Cloud),
             "strict" => Ok(Self::Strict),
             "interactive" => Ok(Self::Interactive),
-            _ => Err(OaieError::Other(format!(
-                "unknown containment profile: {s:?} (valid: local, cloud, strict, interactive)"
-            ))),
+            _ => Err(OaieError::Other(format!("unknown containment profile: {s:?} (valid: local, cloud, strict, interactive)"))),
         }
     }
 
@@ -550,29 +603,29 @@ impl ContainmentProfile {
         match self {
             Self::Local => SessionBudget {
                 max_tool_calls: 100,
-                max_wall_time_s: 3600,       // 1h
-                max_tool_time_s: 1800,       // 30m
+                max_wall_time_s: 3600,           // 1h
+                max_tool_time_s: 1800,           // 30m
                 max_output_bytes: 2_147_483_648, // 2 GiB
                 ..SessionBudget::default()
             },
             Self::Cloud => SessionBudget {
                 max_tool_calls: 50,
-                max_wall_time_s: 1800,       // 30m
-                max_tool_time_s: 600,        // 10m
+                max_wall_time_s: 1800,           // 30m
+                max_tool_time_s: 600,            // 10m
                 max_output_bytes: 1_073_741_824, // 1 GiB
                 ..SessionBudget::default()
             },
             Self::Strict => SessionBudget {
                 max_tool_calls: 20,
-                max_wall_time_s: 600,        // 10m
-                max_tool_time_s: 300,        // 5m
+                max_wall_time_s: 600,          // 10m
+                max_tool_time_s: 300,          // 5m
                 max_output_bytes: 268_435_456, // 256 MiB
                 ..SessionBudget::default()
             },
             Self::Interactive => SessionBudget {
                 max_tool_calls: 200,
-                max_wall_time_s: 7200,       // 2h
-                max_tool_time_s: 3600,       // 1h
+                max_wall_time_s: 7200,           // 2h
+                max_tool_time_s: 3600,           // 1h
                 max_output_bytes: 2_147_483_648, // 2 GiB
                 ..SessionBudget::default()
             },

@@ -73,7 +73,11 @@ fn landlock_abi_version() -> u32 {
             1u32, // LANDLOCK_CREATE_RULESET_ATTR_SIZE_VER1
         )
     };
-    if ret >= 0 { ret as u32 } else { 0 }
+    if ret >= 0 {
+        ret as u32
+    } else {
+        0
+    }
 }
 
 /// Build the handled_access_fs bitmask for the detected ABI version.
@@ -138,7 +142,14 @@ struct PathBeneathAttr {
 ///
 /// `extra_ro_count` and `extra_rw_count` are the number of extra mounts
 /// at `/mnt/ro0`..`/mnt/ro{n-1}` and `/mnt/rw0`..`/mnt/rw{n-1}`.
-pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize) -> Result<bool> {
+///
+/// `session_targets` are (target_path, writable, exec) for identity-bind
+/// session mounts. These land at arbitrary paths, not under /mnt/, so they
+/// need their own PATH_BENEATH rules — without one, Landlock's deny-by-default
+/// blocks everything (the bind mount succeeds but open()/execve() get EACCES).
+/// A target under /tmp would accidentally work via the /tmp rule at line ~185,
+/// but a target under /home (where build outputs live) would not.
+pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize, session_targets: &[(String, bool, bool)]) -> Result<bool> {
     // Negotiate ABI version for best-available filesystem restrictions.
     let abi = landlock_abi_version();
     if abi == 0 {
@@ -148,9 +159,7 @@ pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize) -> Result<bo
     let rw_access = rw_access_for_abi(abi);
 
     // 1. Create a ruleset handling all filesystem access.
-    let attr = RulesetAttr {
-        handled_access_fs: all_access,
-    };
+    let attr = RulesetAttr { handled_access_fs: all_access };
     let ruleset_fd = unsafe {
         libc::syscall(
             SYS_LANDLOCK_CREATE_RULESET,
@@ -165,9 +174,7 @@ pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize) -> Result<bo
         if errno == libc::ENOSYS || errno == libc::EOPNOTSUPP {
             return Ok(false);
         }
-        return Err(OaieError::SandboxError(format!(
-            "landlock_create_ruleset failed (errno {errno})"
-        )));
+        return Err(OaieError::SandboxError(format!("landlock_create_ruleset failed (errno {errno})")));
     }
     let ruleset_fd = ruleset_fd as i32;
 
@@ -192,7 +199,18 @@ pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize) -> Result<bo
             add_path_rule(ruleset_fd, path, RO_EXEC_ACCESS)?;
         }
 
-        // /proc: read-only (already masked by mount namespace).
+        // /proc: read-only. mounts.rs masks specific sensitive entries
+        // (PROC_SELF_MASK_ENTRIES, the /proc/1/task tmpfs); this rule
+        // covers the unmasked entries (e.g. /proc/self/comm,
+        // /proc/self/coredump_filter) by denying writes.
+        //
+        // CAVEAT: this rule does NOT cover /proc/<pid>/fd/N magic
+        // symlinks. open("/proc/1/fd/0") reopens fd 0's underlying file
+        // by inode, and Landlock's path-walk hooks fire on the symlink
+        // path (covered by this RO rule, open succeeds) but the
+        // resulting fd is for whatever PID 1's fd 0 points at — possibly
+        // a host-side file outside the mount namespace entirely. The
+        // /proc/<pid>/fd defense is the bind-over masks in mounts.rs.
         add_path_rule(ruleset_fd, c"/proc", RO_ACCESS)?;
 
         // /dev: read-write (programs write to /dev/null).
@@ -210,23 +228,52 @@ pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize) -> Result<bo
             let path = format!("/mnt/rw{i}\0");
             add_path_rule_bytes(ruleset_fd, path.as_bytes(), rw_access)?;
         }
+
+        // Session mounts (identity binds at arbitrary targets). exec gets
+        // RO_EXEC_ACCESS — same rights as /usr/bin. The mount layer already
+        // forced the filesystem RO when exec is set, so RO_EXEC here doesn't
+        // open a write-then-run hole; it just lets execve() past Landlock.
+        //
+        // PATH_BENEATH on a non-directory fd only accepts EXECUTE, WRITE_FILE,
+        // READ_FILE — passing READ_DIR or any MAKE_*/REMOVE_* bit gets EINVAL.
+        // This applies to regular files, sockets, device nodes, and fifos alike:
+        // anything that isn't a directory can't have children, so the
+        // container-shaped bits are nonsensical. Use `is_dir()` (not
+        // `is_file()`) so sockets, device nodes, and fifos all take the
+        // file-only mask instead of falling through to EINVAL.
+        const FILE_VALID: u64 = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE;
+        for (target, writable, exec) in session_targets {
+            let access = if *exec {
+                RO_EXEC_ACCESS
+            } else if *writable {
+                rw_access
+            } else {
+                RO_ACCESS
+            };
+            let is_dir = std::fs::metadata(target).map(|m| m.is_dir()).unwrap_or(false);
+            let access = if is_dir { access } else { access & FILE_VALID };
+            let path = format!("{target}\0");
+            add_path_rule_bytes(ruleset_fd, path.as_bytes(), access)?;
+        }
         Ok(())
     };
 
     if let Err(e) = add_rules() {
-        unsafe { libc::close(ruleset_fd); }
+        unsafe {
+            libc::close(ruleset_fd);
+        }
         return Err(e);
     }
 
     // 3. Enforce the ruleset.
     let ret = unsafe { libc::syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0u32) };
-    unsafe { libc::close(ruleset_fd); }
+    unsafe {
+        libc::close(ruleset_fd);
+    }
 
     if ret < 0 {
         let errno = unsafe { *libc::__errno_location() };
-        return Err(OaieError::SandboxError(format!(
-            "landlock_restrict_self failed (errno {errno})"
-        )));
+        return Err(OaieError::SandboxError(format!("landlock_restrict_self failed (errno {errno})")));
     }
 
     Ok(true)
@@ -238,35 +285,21 @@ pub fn apply_landlock(extra_ro_count: usize, extra_rw_count: usize) -> Result<bo
 /// proceed with a degraded Landlock ruleset (deny-by-default means the path would
 /// become inaccessible).
 fn add_path_rule(ruleset_fd: i32, path: &std::ffi::CStr, access: u64) -> Result<()> {
-    let fd = unsafe {
-        libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC)
-    };
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
     if fd < 0 {
         return Ok(()); // Path doesn't exist post-pivot — skip silently.
     }
 
-    let attr = PathBeneathAttr {
-        allowed_access: access,
-        parent_fd: fd,
-    };
+    let attr = PathBeneathAttr { allowed_access: access, parent_fd: fd };
 
-    let ret = unsafe {
-        libc::syscall(
-            SYS_LANDLOCK_ADD_RULE,
-            ruleset_fd,
-            LANDLOCK_RULE_PATH_BENEATH,
-            &attr as *const PathBeneathAttr,
-            0u32,
-        )
-    };
-    unsafe { libc::close(fd); }
+    let ret = unsafe { libc::syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &attr as *const PathBeneathAttr, 0u32) };
+    unsafe {
+        libc::close(fd);
+    }
 
     if ret < 0 {
         let errno = unsafe { *libc::__errno_location() };
-        return Err(OaieError::SandboxError(format!(
-            "landlock: add_rule failed for {:?} (errno {errno})",
-            path
-        )));
+        return Err(OaieError::SandboxError(format!("landlock: add_rule failed for {:?} (errno {errno})", path)));
     }
     Ok(())
 }
@@ -278,64 +311,80 @@ fn add_path_rule(ruleset_fd: i32, path: &std::ffi::CStr, access: u64) -> Result<
 /// ensures this via `format!("/mnt/ro{i}\0")`.
 fn add_path_rule_bytes(ruleset_fd: i32, path_with_nul: &[u8], access: u64) -> Result<()> {
     if path_with_nul.last() != Some(&0) {
-        return Err(OaieError::SandboxError(
-            "landlock: path_with_nul not NUL-terminated".into(),
-        ));
+        return Err(OaieError::SandboxError("landlock: path_with_nul not NUL-terminated".into()));
     }
-    let fd = unsafe {
-        libc::open(path_with_nul.as_ptr() as *const libc::c_char, libc::O_PATH | libc::O_CLOEXEC)
-    };
+    let fd = unsafe { libc::open(path_with_nul.as_ptr() as *const libc::c_char, libc::O_PATH | libc::O_CLOEXEC) };
     if fd < 0 {
         return Ok(());
     }
 
-    let attr = PathBeneathAttr {
-        allowed_access: access,
-        parent_fd: fd,
-    };
+    let attr = PathBeneathAttr { allowed_access: access, parent_fd: fd };
 
-    let ret = unsafe {
-        libc::syscall(
-            SYS_LANDLOCK_ADD_RULE,
-            ruleset_fd,
-            LANDLOCK_RULE_PATH_BENEATH,
-            &attr as *const PathBeneathAttr,
-            0u32,
-        )
-    };
-    unsafe { libc::close(fd); }
+    let ret = unsafe { libc::syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &attr as *const PathBeneathAttr, 0u32) };
+    unsafe {
+        libc::close(fd);
+    }
 
     if ret < 0 {
         let errno = unsafe { *libc::__errno_location() };
         let path_display = &path_with_nul[..path_with_nul.len().saturating_sub(1)];
-        return Err(OaieError::SandboxError(format!(
-            "landlock: add_rule failed for {} (errno {errno})",
-            String::from_utf8_lossy(path_display)
-        )));
+        return Err(OaieError::SandboxError(format!("landlock: add_rule failed for {} (errno {errno})", String::from_utf8_lossy(path_display))));
     }
     Ok(())
 }
 
-/// Probe whether Landlock is available on this kernel.
+/// Probe whether Landlock would be applied on this kernel.
 ///
-/// Returns `true` if `landlock_create_ruleset` succeeds with a minimal ruleset,
-/// `false` if ENOSYS or EOPNOTSUPP. Used by `oaie doctor`.
+/// Mirrors `apply_landlock`'s preconditions EXACTLY: same abi-version
+/// check, same `create_ruleset` call with the same negotiated access
+/// bits. Returns `true` iff `apply_landlock` would proceed past those
+/// checks (i.e., would not return `Ok(false)`).
+///
+/// The signed manifest reads this probe to attest `landlock=true`, but
+/// `apply_landlock` runs in the cloned child with no channel back to
+/// the parent. If probe and apply test different code paths, the
+/// manifest can attest `landlock=true` while the child got `Ok(false)`
+/// and never restricted itself. This implementation keeps them in sync:
+///   - abi == 0  →  apply returns Ok(false), probe returns false
+///   - create_ruleset(negotiated bits) ENOSYS/EOPNOTSUPP  →  same
+///   - create_ruleset succeeds  →  apply proceeds to add_rule/
+///     restrict_self, probe returns true
+///
+/// If `add_rule` or `restrict_self` fail later in `apply_landlock`, the
+/// child closure returns 127, the workload doesn't run, and no manifest
+/// is built. So that path can't produce a lying manifest, and the probe
+/// doesn't need to test it.
+///
+/// The PROPER fix is a child→parent status pipe carrying the actual
+/// apply result — that covers ALL divergence including kernel bugs we
+/// haven't thought of. This rewrite covers KNOWN divergence with one
+/// function change instead of touching 4 files. The status pipe is
+/// future work; this stops the lie today.
+///
+/// Used by `oaie doctor` and runner.rs's manifest builder.
 pub fn probe_landlock() -> bool {
-    let attr = RulesetAttr {
-        handled_access_fs: ALL_FS_ACCESS_V1,
-    };
-    let ret = unsafe {
-        libc::syscall(
-            SYS_LANDLOCK_CREATE_RULESET,
-            &attr as *const RulesetAttr,
-            std::mem::size_of::<RulesetAttr>(),
-            0u32,
-        )
-    };
+    // Mirror the abi-version check in apply_landlock.
+    let abi = landlock_abi_version();
+    if abi == 0 {
+        return false;
+    }
+
+    // Mirror apply_landlock's create_ruleset call. Use the access bits
+    // negotiated for the abi we just probed (kernel ≥5.19 adds REFER,
+    // ≥6.2 adds TRUNCATE, etc.); hardcoding V1 here would diverge from
+    // apply on newer kernels and produce a lying probe. Same flags=0
+    // and same ENOSYS/EOPNOTSUPP handling as apply.
+    let attr = RulesetAttr { handled_access_fs: all_fs_access_for_abi(abi) };
+    let ret = unsafe { libc::syscall(SYS_LANDLOCK_CREATE_RULESET, &attr as *const RulesetAttr, std::mem::size_of::<RulesetAttr>(), 0u32) };
     if ret >= 0 {
-        unsafe { libc::close(ret as i32); }
+        unsafe {
+            libc::close(ret as i32);
+        }
         true
     } else {
+        // ENOSYS/EOPNOTSUPP → apply returns Ok(false). Any other errno
+        // → apply returns Err → child exits 127 → no manifest. Either
+        // way, "false" here doesn't lie: landlock won't be applied.
         false
     }
 }

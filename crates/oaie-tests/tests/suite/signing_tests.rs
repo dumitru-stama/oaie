@@ -91,21 +91,24 @@ fn test_key_load_by_label() {
 
 // ── Unit tests: sign and verify ──
 
+use signing::VerifyOutcome;
+
 #[test]
 fn test_sign_and_verify_roundtrip() {
     let manifest_bytes = b"[manifest]\nversion = 1\nrun_id = \"abc\"";
 
     let (key_info, secret) = signing::generate_keypair("roundtrip").unwrap();
-    let sig = signing::sign_manifest(manifest_bytes, &secret, &key_info, HashAlgorithm::Blake3)
-        .unwrap();
+    let sig = signing::sign_manifest(manifest_bytes, &secret, &key_info, HashAlgorithm::Blake3).unwrap();
 
     assert_eq!(sig.version, 1);
     assert_eq!(sig.signer_label, "roundtrip");
     assert_eq!(sig.hash_algorithm, "blake3");
     assert_eq!(sig.signature.len(), 128); // 64 bytes = 128 hex
 
-    let valid = signing::verify_signature(manifest_bytes, &sig, HashAlgorithm::Blake3).unwrap();
-    assert!(valid, "signature should verify against same manifest bytes");
+    // The trust list contains exactly the signing key's pubkey.
+    let trusted = vec![key_info.public_key.clone()];
+    let outcome = signing::verify_signature(manifest_bytes, &sig, HashAlgorithm::Blake3, &trusted).unwrap();
+    assert_eq!(outcome, VerifyOutcome::Trusted, "signature should verify and key should be trusted");
 }
 
 #[test]
@@ -113,19 +116,17 @@ fn test_verify_fails_wrong_key() {
     let manifest_bytes = b"manifest content";
 
     let (key_a, secret_a) = signing::generate_keypair("key-a").unwrap();
-    let sig = signing::sign_manifest(manifest_bytes, &secret_a, &key_a, HashAlgorithm::Blake3)
-        .unwrap();
+    let sig = signing::sign_manifest(manifest_bytes, &secret_a, &key_a, HashAlgorithm::Blake3).unwrap();
 
-    // Tamper: replace public key with key B's public key.
+    // Tamper: replace public key with key B's public key. The signature
+    // was made by A's secret over the hash; B's verifying key won't
+    // accept it. BadSignature regardless of whether B is trusted.
     let (key_b, _) = signing::generate_keypair("key-b").unwrap();
-    let tampered_sig = SignatureInfo {
-        public_key: key_b.public_key.clone(),
-        ..sig
-    };
+    let tampered_sig = SignatureInfo { public_key: key_b.public_key.clone(), ..sig };
 
-    let valid =
-        signing::verify_signature(manifest_bytes, &tampered_sig, HashAlgorithm::Blake3).unwrap();
-    assert!(!valid, "signature should fail with wrong public key");
+    let trusted = vec![key_b.public_key.clone()]; // Trust B (irrelevant).
+    let outcome = signing::verify_signature(manifest_bytes, &tampered_sig, HashAlgorithm::Blake3, &trusted).unwrap();
+    assert_eq!(outcome, VerifyOutcome::BadSignature, "signature made by A should not verify against B's pubkey");
 }
 
 #[test]
@@ -133,13 +134,76 @@ fn test_verify_fails_tampered_manifest() {
     let manifest_bytes = b"original manifest";
 
     let (key_info, secret) = signing::generate_keypair("tamper-test").unwrap();
-    let sig = signing::sign_manifest(manifest_bytes, &secret, &key_info, HashAlgorithm::Blake3)
-        .unwrap();
+    let sig = signing::sign_manifest(manifest_bytes, &secret, &key_info, HashAlgorithm::Blake3).unwrap();
 
     let tampered_manifest = b"modified manifest";
-    let valid =
-        signing::verify_signature(tampered_manifest, &sig, HashAlgorithm::Blake3).unwrap();
-    assert!(!valid, "signature should fail with tampered manifest bytes");
+    let trusted = vec![key_info.public_key.clone()];
+    let outcome = signing::verify_signature(tampered_manifest, &sig, HashAlgorithm::Blake3, &trusted).unwrap();
+    assert_eq!(outcome, VerifyOutcome::BadSignature, "signature should fail with tampered manifest bytes");
+}
+
+#[test]
+fn test_verify_self_attesting_signature_rejected() {
+    // Pins the trust anchor: an attacker can generate a keypair, sign
+    // any manifest, and embed their pubkey in the sidecar — the Ed25519
+    // math will check out. Verification must consult the operator's
+    // trust list and report `UntrustedKey`, never `Trusted`.
+    let manifest_bytes = b"any manifest the attacker wants";
+
+    let (attacker_key, attacker_secret) = signing::generate_keypair("trusted-builder-01").unwrap();
+    let sig = signing::sign_manifest(manifest_bytes, &attacker_secret, &attacker_key, HashAlgorithm::Blake3).unwrap();
+
+    // The operator's trust list does NOT include the attacker's key.
+    let (operator_key, _) = signing::generate_keypair("real-operator").unwrap();
+    let trusted = vec![operator_key.public_key];
+
+    let outcome = signing::verify_signature(manifest_bytes, &sig, HashAlgorithm::Blake3, &trusted).unwrap();
+    assert_eq!(
+        outcome,
+        VerifyOutcome::UntrustedKey,
+        "self-attesting signature must be UntrustedKey, NOT Trusted. \
+         signer_label='{}' is attacker-chosen and proves nothing.",
+        sig.signer_label
+    );
+}
+
+#[test]
+fn test_verify_no_trust_store_is_skip_not_pass() {
+    // Empty trust list maps to `NoTrustStore`, never `Trusted`. The
+    // verifier reports `CheckStatus::Skip` rather than asserting trust
+    // it can't actually establish.
+    let manifest_bytes = b"some manifest";
+    let (key_info, secret) = signing::generate_keypair("anyone").unwrap();
+    let sig = signing::sign_manifest(manifest_bytes, &secret, &key_info, HashAlgorithm::Blake3).unwrap();
+
+    let outcome = signing::verify_signature(manifest_bytes, &sig, HashAlgorithm::Blake3, &[]).unwrap();
+    assert_eq!(outcome, VerifyOutcome::NoTrustStore);
+}
+
+#[test]
+fn test_verify_trust_check_after_crypto_check() {
+    // An attacker who KNOWS a trusted pubkey but doesn't have its
+    // secret puts the trusted pubkey in sig.public_key. The trust
+    // check would say "trusted" — but the Ed25519 verify happens
+    // FIRST and fails (the signature wasn't made by that key's
+    // secret). BadSignature, not Trusted.
+    let manifest_bytes = b"target manifest";
+
+    let (operator_key, _operator_secret_unavailable_to_attacker) = signing::generate_keypair("operator").unwrap();
+    let (attacker_key, attacker_secret) = signing::generate_keypair("attacker").unwrap();
+
+    // Attacker signs with their own secret but claims the operator's pubkey.
+    let mut sig = signing::sign_manifest(manifest_bytes, &attacker_secret, &attacker_key, HashAlgorithm::Blake3).unwrap();
+    sig.public_key = operator_key.public_key.clone();
+
+    let trusted = vec![operator_key.public_key];
+    let outcome = signing::verify_signature(manifest_bytes, &sig, HashAlgorithm::Blake3, &trusted).unwrap();
+    assert_eq!(
+        outcome,
+        VerifyOutcome::BadSignature,
+        "claiming a trusted pubkey without its secret must fail at the \
+         Ed25519 layer, before the trust gate even runs"
+    );
 }
 
 #[test]
@@ -210,38 +274,26 @@ fn test_run_with_sign_flag() {
         interactive: false,
     };
 
-    let result = runner
-        .execute(
-            &job,
-            &default_resolved_policy(job.timeout),
-            true,
-            Some(&key_info.key_id),
-        )
-        .expect("signed run should succeed");
+    let result = runner.execute(&job, &default_resolved_policy(job.timeout), true, Some(&key_info.key_id)).expect("signed run should succeed");
 
     assert_eq!(result.exit_code, 0);
-    assert!(
-        result.signed_by.is_some(),
-        "result should have signed_by set"
-    );
+    assert!(result.signed_by.is_some(), "result should have signed_by set");
     let signed_by = result.signed_by.unwrap();
-    assert!(
-        signed_by.contains("test-signer"),
-        "signed_by should contain label, got: {signed_by}"
-    );
+    assert!(signed_by.contains("test-signer"), "signed_by should contain label, got: {signed_by}");
 
     // Verify signature.toml exists in run dir.
     let run_dir = store.runs_dir.join(result.run_id.full());
     let sig_path = run_dir.join("signature.toml");
     assert!(sig_path.exists(), "signature.toml should exist in run dir");
 
-    // Parse and verify the signature.
+    // Parse and verify the signature against a trust list containing
+    // exactly the key we signed with.
     let sig_content = std::fs::read_to_string(&sig_path).unwrap();
     let sig: SignatureInfo = toml::from_str(&sig_content).unwrap();
     let manifest_bytes = std::fs::read(run_dir.join("manifest.toml")).unwrap();
-    let valid =
-        signing::verify_signature(&manifest_bytes, &sig, store.hash_algorithm).unwrap();
-    assert!(valid, "signature should verify against the manifest");
+    let trusted = vec![sig.public_key.clone()]; // Trust the key we just used.
+    let outcome = signing::verify_signature(&manifest_bytes, &sig, store.hash_algorithm, &trusted).unwrap();
+    assert_eq!(outcome, VerifyOutcome::Trusted, "signature should verify against the manifest with its own key trusted");
 }
 
 #[test]
@@ -269,24 +321,15 @@ fn test_run_unsigned_verify_skips_signature() {
         interactive: false,
     };
 
-    let result = runner
-        .execute(&job, &default_resolved_policy(job.timeout), true, None)
-        .expect("unsigned run should succeed");
+    let result = runner.execute(&job, &default_resolved_policy(job.timeout), true, None).expect("unsigned run should succeed");
 
     assert!(result.signed_by.is_none(), "unsigned run should have no signed_by");
 
     // Verify: check 12 should be Skip.
     let report = oaie_cli::verify::verify_run(&store, &result.run_id).unwrap();
-    let sig_check = report
-        .checks
-        .iter()
-        .find(|c| c.check == CheckKind::ManifestSignature);
+    let sig_check = report.checks.iter().find(|c| c.check == CheckKind::ManifestSignature);
     assert!(sig_check.is_some(), "ManifestSignature check should exist");
-    assert_eq!(
-        sig_check.unwrap().status,
-        oaie_core::verify::CheckStatus::Skip,
-        "unsigned run's signature check should be Skip"
-    );
+    assert_eq!(sig_check.unwrap().status, oaie_core::verify::CheckStatus::Skip, "unsigned run's signature check should be Skip");
 }
 
 #[test]
@@ -314,17 +357,10 @@ fn test_verify_12_checks_total() {
         interactive: false,
     };
 
-    let result = runner
-        .execute(&job, &default_resolved_policy(job.timeout), true, None)
-        .unwrap();
+    let result = runner.execute(&job, &default_resolved_policy(job.timeout), true, None).unwrap();
 
     let report = oaie_cli::verify::verify_run(&store, &result.run_id).unwrap();
-    assert_eq!(
-        report.checks.len(),
-        12,
-        "verify report should have exactly 12 checks, got {}",
-        report.checks.len()
-    );
+    assert_eq!(report.checks.len(), 12, "verify report should have exactly 12 checks, got {}", report.checks.len());
 }
 
 #[test]
@@ -334,11 +370,18 @@ fn test_signed_run_verify_passes() {
         return;
     }
 
-    let (store, _dir) = setup_store();
+    let (mut store, _dir) = setup_store();
 
-    // Generate key.
+    // Generate key AND seed it as trusted. Without the trust-store seed,
+    // verify_run reports Skip (NoTrustStore) — a cryptographically-valid
+    // signature against a key from inside the file under verification
+    // proves nothing.
     let (key_info, secret) = signing::generate_keypair("verify-pass").unwrap();
     signing::save_key(&store.keys_dir, &key_info, &secret).unwrap();
+    store.signing = Some(oaie_core::store_config::SigningConfig {
+        default_key: None,
+        trusted_public_keys: vec![key_info.public_key.clone()],
+    });
 
     let runner = Runner::new(store.clone()).unwrap();
     let job = oaie_core::job::JobSpec {
@@ -356,29 +399,13 @@ fn test_signed_run_verify_passes() {
         interactive: false,
     };
 
-    let result = runner
-        .execute(
-            &job,
-            &default_resolved_policy(job.timeout),
-            true,
-            Some(&key_info.key_id),
-        )
-        .unwrap();
+    let result = runner.execute(&job, &default_resolved_policy(job.timeout), true, Some(&key_info.key_id)).unwrap();
 
     // Verify: check 12 should be Pass.
     let report = oaie_cli::verify::verify_run(&store, &result.run_id).unwrap();
-    let sig_check = report
-        .checks
-        .iter()
-        .find(|c| c.check == CheckKind::ManifestSignature)
-        .expect("ManifestSignature check should exist");
+    let sig_check = report.checks.iter().find(|c| c.check == CheckKind::ManifestSignature).expect("ManifestSignature check should exist");
 
-    assert_eq!(
-        sig_check.status,
-        oaie_core::verify::CheckStatus::Pass,
-        "signed run's signature check should Pass, detail: {:?}",
-        sig_check.detail
-    );
+    assert_eq!(sig_check.status, oaie_core::verify::CheckStatus::Pass, "signed run's signature check should Pass, detail: {:?}", sig_check.detail);
 }
 
 #[test]
@@ -410,14 +437,7 @@ fn test_tampered_manifest_verify_fails() {
         interactive: false,
     };
 
-    let result = runner
-        .execute(
-            &job,
-            &default_resolved_policy(job.timeout),
-            true,
-            Some(&key_info.key_id),
-        )
-        .unwrap();
+    let result = runner.execute(&job, &default_resolved_policy(job.timeout), true, Some(&key_info.key_id)).unwrap();
 
     // Tamper with the manifest after signing.
     let run_dir = store.runs_dir.join(result.run_id.full());
@@ -428,18 +448,9 @@ fn test_tampered_manifest_verify_fails() {
 
     // Verify: check 12 should be Fail.
     let report = oaie_cli::verify::verify_run(&store, &result.run_id).unwrap();
-    let sig_check = report
-        .checks
-        .iter()
-        .find(|c| c.check == CheckKind::ManifestSignature)
-        .expect("ManifestSignature check should exist");
+    let sig_check = report.checks.iter().find(|c| c.check == CheckKind::ManifestSignature).expect("ManifestSignature check should exist");
 
-    assert_eq!(
-        sig_check.status,
-        oaie_core::verify::CheckStatus::Fail,
-        "tampered manifest signature check should Fail, detail: {:?}",
-        sig_check.detail
-    );
+    assert_eq!(sig_check.status, oaie_core::verify::CheckStatus::Fail, "tampered manifest signature check should Fail, detail: {:?}", sig_check.detail);
 }
 
 #[test]
@@ -471,14 +482,7 @@ fn test_export_includes_signature() {
         interactive: false,
     };
 
-    let result = runner
-        .execute(
-            &job,
-            &default_resolved_policy(job.timeout),
-            true,
-            Some(&key_info.key_id),
-        )
-        .unwrap();
+    let result = runner.execute(&job, &default_resolved_policy(job.timeout), true, Some(&key_info.key_id)).unwrap();
 
     // Build a tar.gz archive the same way export.rs does.
     let run_dir = store.runs_dir.join(result.run_id.full());
@@ -494,8 +498,7 @@ fn test_export_includes_signature() {
         header.set_size(manifest_bytes.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        tar.append_data(&mut header, "export/manifest.toml", &manifest_bytes[..])
-            .unwrap();
+        tar.append_data(&mut header, "export/manifest.toml", &manifest_bytes[..]).unwrap();
 
         // Add signature.toml (same logic as export.rs).
         let sig_path = run_dir.join("signature.toml");
@@ -505,8 +508,7 @@ fn test_export_includes_signature() {
         sig_header.set_size(sig_bytes.len() as u64);
         sig_header.set_mode(0o644);
         sig_header.set_cksum();
-        tar.append_data(&mut sig_header, "export/signature.toml", &sig_bytes[..])
-            .unwrap();
+        tar.append_data(&mut sig_header, "export/signature.toml", &sig_bytes[..]).unwrap();
 
         tar.finish().unwrap();
     }
@@ -516,21 +518,10 @@ fn test_export_includes_signature() {
     let gz = flate2::read::GzDecoder::new(archive_file);
     let mut archive = tar::Archive::new(gz);
 
-    let entry_names: Vec<String> = archive
-        .entries()
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().into_owned()))
-        .collect();
+    let entry_names: Vec<String> = archive.entries().unwrap().filter_map(|e| e.ok()).filter_map(|e| e.path().ok().map(|p| p.to_string_lossy().into_owned())).collect();
 
-    assert!(
-        entry_names.iter().any(|n| n.contains("signature.toml")),
-        "archive should contain signature.toml, entries: {entry_names:?}"
-    );
-    assert!(
-        entry_names.iter().any(|n| n.contains("manifest.toml")),
-        "archive should contain manifest.toml, entries: {entry_names:?}"
-    );
+    assert!(entry_names.iter().any(|n| n.contains("signature.toml")), "archive should contain signature.toml, entries: {entry_names:?}");
+    assert!(entry_names.iter().any(|n| n.contains("manifest.toml")), "archive should contain manifest.toml, entries: {entry_names:?}");
 
     // Verify the signature.toml content in the archive is valid TOML.
     let sig_content = std::fs::read_to_string(run_dir.join("signature.toml")).unwrap();

@@ -3,8 +3,32 @@
 //! Wire format: 4-byte big-endian length prefix + JSON payload.
 //! Both request and response use the same framing.
 
+use std::net::IpAddr;
+
 use oaie_core::cgroup::CgroupLimits;
 use serde::{Deserialize, Serialize};
+
+/// One entry in the netns egress allowlist. The privileged helper
+/// reconstructs the nft script from these typed fields — the unprivileged
+/// caller never holds raw nft command text.
+/// Mirrors the fields `oaie_netpol::nftables::generate_nft_script` actually
+/// reads from `ResolvedAllowRule`, using std-only types so oaie-priv's
+/// dependency surface stays minimal.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NetAllowRule {
+    /// Resolved IP addresses (one rule emitted per address).
+    /// Empty if `cidr` is set.
+    #[serde(default)]
+    pub addrs: Vec<IpAddr>,
+    /// CIDR network in canonical text form, e.g. "10.0.0.0/24" or
+    /// "2001:db8::/32". Mutually exclusive with `addrs`.
+    #[serde(default)]
+    pub cidr: Option<String>,
+    /// Destination port (1..=65535, validated as nonzero).
+    pub port: u16,
+    /// Transport protocol: exactly "tcp" or "udp".
+    pub protocol: String,
+}
 
 /// Request sent from the oaie-cgroup client to the oaie-priv helper.
 #[derive(Debug, Serialize, Deserialize)]
@@ -12,15 +36,10 @@ use serde::{Deserialize, Serialize};
 pub enum Request {
     /// Create a cgroup scope for a run with the given limits.
     #[serde(rename = "create_cgroup")]
-    CreateCgroup {
-        run_id: String,
-        limits: CgroupLimits,
-    },
+    CreateCgroup { run_id: String, limits: CgroupLimits },
     /// Clean up (remove) a cgroup scope at the given path.
     #[serde(rename = "cleanup_cgroup")]
-    CleanupCgroup {
-        cgroup_path: String,
-    },
+    CleanupCgroup { cgroup_path: String },
     /// Load BPF programs, attach to tracepoints, and return FDs.
     /// This starts a two-phase flow: oaie-priv stays alive until
     /// `UnloadBpf` is received or the socket is closed.
@@ -39,19 +58,13 @@ pub enum Request {
     #[serde(rename = "ping")]
     Ping,
     /// Set up network namespace for allowlist mode: veth pair + NAT + nftables.
+    /// The nft script is generated *here*, on the privileged side, from
+    /// validated `allow_rules` — never accepted as caller-supplied text.
     #[serde(rename = "setup_netns")]
-    SetupNetns {
-        sandbox_pid: u32,
-        run_id_short: String,
-        nft_script: String,
-    },
+    SetupNetns { sandbox_pid: u32, run_id_short: String, allow_rules: Vec<NetAllowRule> },
     /// Clean up network namespace host-side resources.
     #[serde(rename = "cleanup_netns")]
-    CleanupNetns {
-        host_iface: String,
-        nat_subnet: String,
-        host_default_iface: String,
-    },
+    CleanupNetns { host_iface: String, nat_subnet: String, host_default_iface: String },
 }
 
 /// Response sent from the oaie-priv helper back to the client.

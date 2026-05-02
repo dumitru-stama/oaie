@@ -198,7 +198,10 @@ impl FirecrackerVm {
         // Wait for AgentReady message.
         match vsock_stream.recv()? {
             Some(Message::AgentReady { version }) => {
-                eprintln!("OAIE: guest agent v{version} ready");
+                // `version` crosses the guest→host trust boundary; escape so a
+                // crafted version string can't inject ANSI/CR into the
+                // operator's terminal.
+                eprintln!("OAIE: guest agent v{} ready", version.escape_debug());
             }
             Some(other) => {
                 return Err(OaieError::Io(io::Error::new(
@@ -270,6 +273,11 @@ impl FirecrackerVm {
             .unwrap_or(Duration::from_secs(3600));
 
         let start = Instant::now();
+        // Host-side cap on cumulative stdout+stderr written on the guest's
+        // behalf. Matches the RLIMIT_FSIZE bound enforced in the namespace
+        // backend; here the HOST is the writer so rlimits don't apply.
+        const MAX_STREAM_BYTES: u64 = 1024 * 1024 * 1024;
+        let mut total_output_bytes: u64 = 0;
 
         loop {
             if start.elapsed() > job_timeout {
@@ -279,9 +287,26 @@ impl FirecrackerVm {
                 )));
             }
 
-            match self.vsock.recv_timeout(Duration::from_secs(60))? {
+            // Bound each frame read by the remaining job budget so a
+            // byte-trickling guest cannot hold read_exact() past job_timeout.
+            let recv_budget = job_timeout
+                .saturating_sub(start.elapsed())
+                .min(Duration::from_secs(60))
+                .max(Duration::from_secs(1));
+            match self.vsock.recv_timeout(recv_budget)? {
                 Some(Message::OutputChunk { stream, data }) => {
                     let bytes = crate::wire::base64_decode(&data)?;
+                    total_output_bytes =
+                        total_output_bytes.saturating_add(bytes.len() as u64);
+                    if total_output_bytes > MAX_STREAM_BYTES {
+                        return Err(OaieError::Io(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "guest output exceeded {} bytes (host-side cap)",
+                                MAX_STREAM_BYTES
+                            ),
+                        )));
+                    }
                     match stream.as_str() {
                         "stdout" => {
                             stdout_file.write_all(&bytes)?;
@@ -303,13 +328,16 @@ impl FirecrackerVm {
                 }
                 Some(Message::JobDone {
                     exit_code,
-                    duration_ms,
+                    duration_ms: _,
                 }) => {
-                    return Ok((exit_code, Duration::from_millis(duration_ms)));
+                    // Host-observed duration; guest-supplied duration_ms is untrusted.
+                    return Ok((exit_code, start.elapsed()));
                 }
                 Some(Message::Error { message }) => {
                     return Err(OaieError::Io(io::Error::other(
-                        format!("guest agent error: {message}"),
+                        // Guest-supplied; escape before it reaches host stderr
+                        // via the caller's error path.
+                        format!("guest agent error: {}", message.escape_debug()),
                     )));
                 }
                 Some(other) => {

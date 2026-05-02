@@ -54,6 +54,28 @@ pub struct RunCmd {
     #[arg(long)]
     pub rw: Vec<PathBuf>,
 
+    /// Bind-mount a host path read-only at the SAME path inside the sandbox
+    /// (identity mapping, bwrap-style). Differs from `--ro` which maps to
+    /// `/mnt/ro{i}`. Use this when the command inside references host paths
+    /// literally — e.g. a pre-built JSON envelope containing absolute paths,
+    /// or a tool invoked via `sh -c 'executor < /host/scratch/input.json'`.
+    #[arg(long = "bind-ro")]
+    pub bind_ro: Vec<PathBuf>,
+
+    /// Bind-mount a host path read-write at the SAME path inside the sandbox.
+    /// See `--bind-ro`. Target must not collide with reserved paths
+    /// (/proc, /sys, /dev, /in, /out) — validation rejects those.
+    #[arg(long = "bind-rw")]
+    pub bind_rw: Vec<PathBuf>,
+
+    /// Bind-mount a host path read-only AND executable at the same path inside.
+    /// `--bind-ro` mounts with NOEXEC (correct for data — artifacts, scratch,
+    /// caches). This variant drops NOEXEC for the narrow case of a prebuilt
+    /// executor binary that lives outside /usr. Read-only is forced: exec+rw
+    /// would let the tool write a payload and run it.
+    #[arg(long = "bind-exec")]
+    pub bind_exec: Vec<PathBuf>,
+
     /// Network mode: on, off, allow:host:port, preset:name (default: off)
     ///
     /// Without a value, `--net` enables full network access (backward compat).
@@ -146,6 +168,9 @@ impl RunCmd {
             timeout: self.timeout.as_deref(),
             ro: &self.ro,
             rw: &self.rw,
+            bind_ro: &self.bind_ro,
+            bind_rw: &self.bind_rw,
+            bind_exec: &self.bind_exec,
             no_auto_mount: self.no_auto_mount,
             command: &self.command,
             input: self.input.as_ref(),

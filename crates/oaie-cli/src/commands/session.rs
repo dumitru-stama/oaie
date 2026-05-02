@@ -7,10 +7,7 @@
 use clap::{Args, Subcommand};
 
 use oaie_core::error::{OaieError, Result};
-use oaie_core::session::{
-    ApprovalPolicy, BudgetExtensionRequest, ContainmentProfile, SessionBudget, SessionConfig,
-    ToolFilter,
-};
+use oaie_core::session::{ApprovalPolicy, BudgetExtensionRequest, ContainmentProfile, SessionBudget, SessionConfig, ToolFilter};
 
 use super::load_store;
 use crate::output;
@@ -139,9 +136,14 @@ pub struct SessionRunCmd {
     #[arg(long)]
     pub require_approval: bool,
 
-    /// Run agent inside a sandbox (experimental)
+    /// Run agent UNSANDBOXED on the host (operator opt-out — only for
+    /// trusted local agents you wrote, never for AI-supplied programs).
+    /// The agent runs at supervisor UID with full host filesystem
+    /// visibility. Default is sandboxed. Was the inverse (`--sandbox-agent`,
+    /// default off → Host) before another change flipped the
+    /// AgentSandboxMode default; now you opt OUT of safety, not in.
     #[arg(long)]
-    pub sandbox_agent: bool,
+    pub unsandboxed_agent: bool,
 
     /// Agent command to run (after --)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -151,16 +153,12 @@ pub struct SessionRunCmd {
 impl SessionRunCmd {
     pub fn execute(&self) -> Result<()> {
         if self.command.is_empty() {
-            return Err(OaieError::InvalidJobSpec(
-                "specify an agent command after --".into(),
-            ));
+            return Err(OaieError::InvalidJobSpec("specify an agent command after --".into()));
         }
 
         // --contained and --policy are mutually exclusive.
         if self.contained.is_some() && self.policy.is_some() {
-            return Err(OaieError::Other(
-                "--contained and --policy are mutually exclusive".into(),
-            ));
+            return Err(OaieError::Other("--contained and --policy are mutually exclusive".into()));
         }
 
         let store = load_store()?;
@@ -202,6 +200,9 @@ impl SessionRunCmd {
             timeout: self.timeout.as_deref(),
             ro: &[],
             rw: &[],
+            bind_ro: &[],
+            bind_rw: &[],
+            bind_exec: &[],
             no_auto_mount: true,
             command: &self.command,
             input: None,
@@ -274,38 +275,25 @@ impl SessionRunCmd {
             tool_filter,
             deny_network_tools: self.deny_net_tools.clone(),
             max_agent_output_bytes: self.max_agent_output,
-            agent_sandbox: if self.sandbox_agent {
-                oaie_core::session::AgentSandboxMode::Sandboxed
-            } else {
+            agent_sandbox: if self.unsandboxed_agent {
+                // Explicit operator opt-out. The flag name forces the
+                // word "unsandboxed" into the command line — you can't
+                // accidentally land here by omission.
                 oaie_core::session::AgentSandboxMode::Host
+            } else {
+                oaie_core::session::AgentSandboxMode::Sandboxed
             },
-            approval: ApprovalPolicy {
-                tool_call: self.require_approval,
-            },
+            approval: ApprovalPolicy { tool_call: self.require_approval },
             max_concurrent_tools: 1,
         };
 
         if !self.quiet {
-            let profile_info = profile
-                .as_ref()
-                .map(|p| format!(" [contained: {}]", p.as_str()))
-                .unwrap_or_default();
-            output::info(&format!(
-                "Starting session: {} (budget: {} tool calls, {}s wall time){}",
-                output::shell_join(&self.command),
-                config.budget.max_tool_calls,
-                config.budget.max_wall_time_s,
-                profile_info,
-            ));
+            let profile_info = profile.as_ref().map(|p| format!(" [contained: {}]", p.as_str())).unwrap_or_default();
+            output::info(&format!("Starting session: {} (budget: {} tool calls, {}s wall time){}", output::shell_join(&self.command), config.budget.max_tool_calls, config.budget.max_wall_time_s, profile_info,));
         }
 
         // Create and run the session.
-        let session = oaie_cli::session_runner::SessionRunner::create(
-            store,
-            resolved,
-            config,
-            &self.command,
-        )?;
+        let session = oaie_cli::session_runner::SessionRunner::create(store, resolved, config, &self.command)?;
 
         if !self.quiet {
             output::info(&format!("Session ID: {}", session.session_id()));
@@ -324,10 +312,7 @@ impl SessionRunCmd {
             output::field("Tool calls", &result.tool_calls.to_string());
             output::field("Wall time", &format!("{}s", result.wall_time_s));
             output::field("Tool time", &format!("{}s", result.total_tool_time_s));
-            output::field(
-                "Output bytes",
-                &oaie_cas::store::format_bytes(result.total_output_bytes),
-            );
+            output::field("Output bytes", &oaie_cas::store::format_bytes(result.total_output_bytes));
             if let Some(ref hash) = result.manifest_hash {
                 output::field("Manifest", &format!("{}...", &hash[..16.min(hash.len())]));
             }
@@ -365,28 +350,16 @@ impl SessionListCmd {
         let hdr_cont = "CONTAINED";
         let hdr_name = "NAME";
         let hdr_created = "CREATED";
-        println!(
-            "{hdr_id:<38} {hdr_status:<12} {hdr_calls:<6} {hdr_cont:<12} {hdr_name:<6} {hdr_created}"
-        );
+        println!("{hdr_id:<38} {hdr_status:<12} {hdr_calls:<6} {hdr_cont:<12} {hdr_name:<6} {hdr_created}");
         println!("{}", "-".repeat(100));
 
         for s in &sessions {
-            let calls = db
-                .list_session_calls(&s.session_id)
-                .map(|c| c.len())
-                .unwrap_or(0);
+            let calls = db.list_session_calls(&s.session_id).map(|c| c.len()).unwrap_or(0);
             let name = s.name.as_deref().unwrap_or("-");
             let containment = s.containment.as_deref().unwrap_or("-");
             // Truncate created timestamp for display.
-            let created = if s.created.len() > 19 {
-                &s.created[..19]
-            } else {
-                &s.created
-            };
-            println!(
-                "{:<38} {:<12} {:<6} {:<12} {:<6} {}",
-                s.session_id, s.status, calls, containment, name, created
-            );
+            let created = if s.created.len() > 19 { &s.created[..19] } else { &s.created };
+            println!("{:<38} {:<12} {:<6} {:<12} {:<6} {}", s.session_id, s.status, calls, containment, name, created);
         }
 
         Ok(())
@@ -407,9 +380,7 @@ impl SessionStatusCmd {
         let store = load_store()?;
         let db = oaie_db::OaieDb::open(&store.db_path)?;
 
-        let session = db
-            .get_session(&self.session_id)?
-            .ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
+        let session = db.get_session(&self.session_id)?.ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
 
         let calls = db.list_session_calls(&session.session_id)?;
 
@@ -427,15 +398,9 @@ impl SessionStatusCmd {
         // Parse and display budget consumption.
         if let Some(ref budget_json) = session.budget_json {
             if let Ok(budget) = serde_json::from_str::<SessionBudget>(budget_json) {
-                output::field(
-                    "Tool calls",
-                    &format!("{} / {}", calls.len(), budget.max_tool_calls),
-                );
+                output::field("Tool calls", &format!("{} / {}", calls.len(), budget.max_tool_calls));
                 let total_time_ms: i64 = calls.iter().filter_map(|c| c.duration_ms).sum();
-                output::field(
-                    "Tool time",
-                    &format!("{}s / {}s", total_time_ms / 1000, budget.max_tool_time_s),
-                );
+                output::field("Tool time", &format!("{}s / {}s", total_time_ms / 1000, budget.max_tool_time_s));
             }
         }
 
@@ -494,9 +459,7 @@ impl SessionInspectCmd {
         let store = load_store()?;
         let db = oaie_db::OaieDb::open(&store.db_path)?;
 
-        let session = db
-            .get_session(&self.session_id)?
-            .ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
+        let session = db.get_session(&self.session_id)?.ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
 
         let calls = db.list_session_calls(&session.session_id)?;
 
@@ -540,23 +503,14 @@ impl SessionInspectCmd {
                 output::field("Max tool calls", &budget.max_tool_calls.to_string());
                 output::field("Max wall time", &format!("{}s", budget.max_wall_time_s));
                 output::field("Max tool time", &format!("{}s", budget.max_tool_time_s));
-                output::field(
-                    "Max output bytes",
-                    &oaie_cas::store::format_bytes(budget.max_output_bytes),
-                );
+                output::field("Max output bytes", &oaie_cas::store::format_bytes(budget.max_output_bytes));
 
                 // Actual usage.
                 let total_time_ms: i64 = calls.iter().filter_map(|c| c.duration_ms).sum();
                 println!();
                 output::header("Usage");
-                output::field(
-                    "Tool calls",
-                    &format!("{} / {}", calls.len(), budget.max_tool_calls),
-                );
-                output::field(
-                    "Tool time",
-                    &format!("{}s / {}s", total_time_ms / 1000, budget.max_tool_time_s),
-                );
+                output::field("Tool calls", &format!("{} / {}", calls.len(), budget.max_tool_calls));
+                output::field("Tool time", &format!("{}s / {}s", total_time_ms / 1000, budget.max_tool_time_s));
             }
         }
 
@@ -574,23 +528,10 @@ impl SessionInspectCmd {
 
             for call in &calls {
                 let cmd: Vec<String> = serde_json::from_str(&call.command).unwrap_or_default();
-                let cmd_str = if cmd.is_empty() {
-                    call.command.clone()
-                } else {
-                    output::shell_join(&cmd)
-                };
-                let duration = call
-                    .duration_ms
-                    .map(|ms| format!("{}ms", ms))
-                    .unwrap_or_else(|| "-".into());
-                let exit = call
-                    .exit_code
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "-".into());
-                println!(
-                    "{:<4} {:<38} {:<10} {:<6} {}",
-                    call.seq, call.run_id, duration, exit, cmd_str
-                );
+                let cmd_str = if cmd.is_empty() { call.command.clone() } else { output::shell_join(&cmd) };
+                let duration = call.duration_ms.map(|ms| format!("{}ms", ms)).unwrap_or_else(|| "-".into());
+                let exit = call.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into());
+                println!("{:<4} {:<38} {:<10} {:<6} {}", call.seq, call.run_id, duration, exit, cmd_str);
             }
         }
 
@@ -627,21 +568,15 @@ impl SessionLogCmd {
         let db = oaie_db::OaieDb::open(&store.db_path)?;
         let cas = oaie_cas::store::CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
 
-        let session = db
-            .get_session(&self.session_id)?
-            .ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
+        let session = db.get_session(&self.session_id)?.ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
 
         // Read session manifest to find event_log_hash.
         let session_dir = store.root.join("sessions").join(&session.session_id);
         let manifest_path = session_dir.join("session_manifest.toml");
-        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-            OaieError::Other(format!("read session manifest: {e}"))
-        })?;
+        let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| OaieError::Other(format!("read session manifest: {e}")))?;
 
         // Parse event_log_hash from manifest TOML.
-        let manifest: toml::Value = manifest_content.parse().map_err(|e: toml::de::Error| {
-            OaieError::Other(format!("parse session manifest: {e}"))
-        })?;
+        let manifest: toml::Value = manifest_content.parse().map_err(|e: toml::de::Error| OaieError::Other(format!("parse session manifest: {e}")))?;
 
         let event_log_hash_str = manifest
             .get("session")
@@ -651,16 +586,11 @@ impl SessionLogCmd {
             .ok_or_else(|| OaieError::Other("no event_log_hash in manifest".into()))?;
 
         // Parse "algo:hex" format.
-        let hash_hex = event_log_hash_str
-            .split(':')
-            .nth(1)
-            .unwrap_or(event_log_hash_str);
+        let hash_hex = event_log_hash_str.split(':').nth(1).unwrap_or(event_log_hash_str);
 
         let hash = oaie_core::artifact::Hash::from_hex(hash_hex)?;
         let blob_path = cas.blob_path(&hash);
-        let ndjson = std::fs::read_to_string(&blob_path).map_err(|e| {
-            OaieError::Other(format!("read event log from CAS: {e}"))
-        })?;
+        let ndjson = std::fs::read_to_string(&blob_path).map_err(|e| OaieError::Other(format!("read event log from CAS: {e}")))?;
 
         let filter_type = &self.r#type;
 
@@ -677,24 +607,12 @@ impl SessionLogCmd {
 
             let matches = match filter_type.as_str() {
                 "all" => true,
-                "tool_call" => matches!(
-                    event.kind,
-                    oaie_core::session::SessionEventKind::ToolDispatch { .. }
-                        | oaie_core::session::SessionEventKind::ToolResult { .. }
-                ),
+                "tool_call" => matches!(event.kind, oaie_core::session::SessionEventKind::ToolDispatch { .. } | oaie_core::session::SessionEventKind::ToolResult { .. }),
                 "budget" => matches!(
                     event.kind,
-                    oaie_core::session::SessionEventKind::BudgetWarning { .. }
-                        | oaie_core::session::SessionEventKind::BudgetExhausted { .. }
-                        | oaie_core::session::SessionEventKind::BudgetExtension { .. }
-                        | oaie_core::session::SessionEventKind::ResourceSnapshot { .. }
+                    oaie_core::session::SessionEventKind::BudgetWarning { .. } | oaie_core::session::SessionEventKind::BudgetExhausted { .. } | oaie_core::session::SessionEventKind::BudgetExtension { .. } | oaie_core::session::SessionEventKind::ResourceSnapshot { .. }
                 ),
-                "io" => matches!(
-                    event.kind,
-                    oaie_core::session::SessionEventKind::SessionStart { .. }
-                        | oaie_core::session::SessionEventKind::SessionStop { .. }
-                        | oaie_core::session::SessionEventKind::AgentOutput { .. }
-                ),
+                "io" => matches!(event.kind, oaie_core::session::SessionEventKind::SessionStart { .. } | oaie_core::session::SessionEventKind::SessionStop { .. } | oaie_core::session::SessionEventKind::AgentOutput { .. }),
                 _ => true,
             };
 
@@ -716,62 +634,29 @@ impl SessionLogCmd {
                     oaie_core::session::SessionEventKind::ToolDispatch { call_id, command } => {
                         format!("TOOL_DISPATCH call_id={call_id} command={}", command.join(" "))
                     }
-                    oaie_core::session::SessionEventKind::ToolResult {
-                        call_id,
-                        run_id,
-                        exit_code,
-                        trace_hash,
-                    } => {
+                    oaie_core::session::SessionEventKind::ToolResult { call_id, run_id, exit_code, trace_hash } => {
                         let th = trace_hash.as_deref().unwrap_or("-");
                         format!("TOOL_RESULT call_id={call_id} run_id={run_id} exit={exit_code} trace={th}")
                     }
-                    oaie_core::session::SessionEventKind::BudgetWarning {
-                        budget_name,
-                        used,
-                        limit,
-                    } => format!("BUDGET_WARNING {budget_name}: {used}/{limit}"),
+                    oaie_core::session::SessionEventKind::BudgetWarning { budget_name, used, limit } => format!("BUDGET_WARNING {budget_name}: {used}/{limit}"),
                     oaie_core::session::SessionEventKind::BudgetExhausted { budget_name } => {
                         format!("BUDGET_EXHAUSTED {budget_name}")
                     }
-                    oaie_core::session::SessionEventKind::BudgetExtension {
-                        budget_name,
-                        old_limit,
-                        new_limit,
-                    } => format!("BUDGET_EXTENSION {budget_name}: {old_limit} -> {new_limit}"),
-                    oaie_core::session::SessionEventKind::HeartbeatTimeout {
-                        elapsed_s,
-                        interval_s,
-                    } => format!("HEARTBEAT_TIMEOUT elapsed={elapsed_s}s interval={interval_s}s"),
+                    oaie_core::session::SessionEventKind::BudgetExtension { budget_name, old_limit, new_limit } => format!("BUDGET_EXTENSION {budget_name}: {old_limit} -> {new_limit}"),
+                    oaie_core::session::SessionEventKind::HeartbeatTimeout { elapsed_s, interval_s } => format!("HEARTBEAT_TIMEOUT elapsed={elapsed_s}s interval={interval_s}s"),
                     oaie_core::session::SessionEventKind::ResourceSnapshot {
                         elapsed_s,
                         tool_calls_used,
                         tool_time_used_s,
                         output_bytes_used,
-                    } => format!(
-                        "RESOURCE_SNAPSHOT elapsed={elapsed_s}s calls={tool_calls_used} tool_time={tool_time_used_s}s output={output_bytes_used}B"
-                    ),
-                    oaie_core::session::SessionEventKind::ToolDenied {
-                        call_id,
-                        command,
-                        reason,
-                    } => format!("TOOL_DENIED call_id={call_id} command={} reason={reason}", command.join(" ")),
+                    } => format!("RESOURCE_SNAPSHOT elapsed={elapsed_s}s calls={tool_calls_used} tool_time={tool_time_used_s}s output={output_bytes_used}B"),
+                    oaie_core::session::SessionEventKind::ToolDenied { call_id, command, reason } => format!("TOOL_DENIED call_id={call_id} command={} reason={reason}", command.join(" ")),
                     oaie_core::session::SessionEventKind::AgentOutput { channel, text } => {
                         format!("AGENT_OUTPUT channel={channel} text={text}")
                     }
-                    oaie_core::session::SessionEventKind::ApprovalRequired {
-                        call_id,
-                        command,
-                        approved,
-                    } => format!(
-                        "APPROVAL call_id={call_id} command={} approved={approved}",
-                        command.join(" ")
-                    ),
+                    oaie_core::session::SessionEventKind::ApprovalRequired { call_id, command, approved } => format!("APPROVAL call_id={call_id} command={} approved={approved}", command.join(" ")),
                 };
-                let ts = if event.timestamp.len() > 19 {
-                    &event.timestamp[11..19]
-                } else {
-                    &event.timestamp
-                };
+                let ts = if event.timestamp.len() > 19 { &event.timestamp[11..19] } else { &event.timestamp };
                 println!("[{ts}] #{:03} {kind_str}", event.seq);
             }
         }
@@ -810,16 +695,11 @@ impl SessionExtendCmd {
         let store = load_store()?;
         let db = oaie_db::OaieDb::open(&store.db_path)?;
 
-        let session = db
-            .get_session(&self.session_id)?
-            .ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
+        let session = db.get_session(&self.session_id)?.ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
 
         // Only extend running or budget_exhausted sessions.
         if session.status != "running" && session.status != "budget_exhausted" {
-            return Err(OaieError::Other(format!(
-                "session {} is not running (status: {})",
-                self.session_id, session.status
-            )));
+            return Err(OaieError::Other(format!("session {} is not running (status: {})", self.session_id, session.status)));
         }
 
         let ext = BudgetExtensionRequest {
@@ -829,24 +709,14 @@ impl SessionExtendCmd {
             add_output_bytes: self.add_output_bytes.unwrap_or(0),
         };
 
-        if ext.add_tool_calls == 0
-            && ext.add_wall_time_s == 0
-            && ext.add_tool_time_s == 0
-            && ext.add_output_bytes == 0
-        {
-            return Err(OaieError::Other(
-                "at least one --add-* flag must be specified".into(),
-            ));
+        if ext.add_tool_calls == 0 && ext.add_wall_time_s == 0 && ext.add_tool_time_s == 0 && ext.add_output_bytes == 0 {
+            return Err(OaieError::Other("at least one --add-* flag must be specified".into()));
         }
 
         // Write budget_extension.json to session dir for the dispatch loop to pick up.
-        let session_dir = store
-            .root
-            .join("sessions")
-            .join(&session.session_id);
+        let session_dir = store.root.join("sessions").join(&session.session_id);
         let ext_path = session_dir.join("budget_extension.json");
-        let ext_json = serde_json::to_string_pretty(&ext)
-            .map_err(|e| OaieError::Other(format!("serialize extension: {e}")))?;
+        let ext_json = serde_json::to_string_pretty(&ext).map_err(|e| OaieError::Other(format!("serialize extension: {e}")))?;
         std::fs::write(&ext_path, ext_json)?;
 
         output::info(&format!("Budget extension written for session {}", self.session_id));
@@ -860,17 +730,14 @@ impl SessionExtendCmd {
             output::field("Add tool time", &format!("{}s", ext.add_tool_time_s));
         }
         if ext.add_output_bytes > 0 {
-            output::field(
-                "Add output bytes",
-                &oaie_cas::store::format_bytes(ext.add_output_bytes),
-            );
+            output::field("Add output bytes", &oaie_cas::store::format_bytes(ext.add_output_bytes));
         }
 
         Ok(())
     }
 }
 
-// ── session profiles (Q.1.5 + Q.1.6) ──
+// ── session profiles ──
 
 /// List and show containment profiles.
 #[derive(Args, Debug)]
@@ -902,10 +769,7 @@ impl SessionProfilesCmd {
             output::field("Max tool calls", &budget.max_tool_calls.to_string());
             output::field("Max wall time", &format!("{}s", budget.max_wall_time_s));
             output::field("Max tool time", &format!("{}s", budget.max_tool_time_s));
-            output::field(
-                "Max output bytes",
-                &oaie_cas::store::format_bytes(budget.max_output_bytes),
-            );
+            output::field("Max output bytes", &oaie_cas::store::format_bytes(budget.max_output_bytes));
         } else {
             // List all profiles.
             output::header("Containment Profiles");
@@ -940,51 +804,30 @@ impl SessionAttachCmd {
         let store = load_store()?;
         let db = oaie_db::OaieDb::open(&store.db_path)?;
 
-        let session = db
-            .get_session(&self.session_id)?
-            .ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
+        let session = db.get_session(&self.session_id)?.ok_or_else(|| OaieError::Database(format!("session not found: {}", self.session_id)))?;
 
         // Only attach to running sessions.
         if session.status != "running" {
-            return Err(OaieError::Other(format!(
-                "session {} is not running (status: {})",
-                self.session_id, session.status
-            )));
+            return Err(OaieError::Other(format!("session {} is not running (status: {})", self.session_id, session.status)));
         }
 
         // Read agent PID from session dir.
         let session_dir = store.root.join("sessions").join(&session.session_id);
         let pid_path = session_dir.join("agent.pid");
-        let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| {
-            OaieError::Other(format!(
-                "read agent PID (is --sandbox-agent active?): {e}"
-            ))
-        })?;
-        let pid: u32 = pid_str
-            .trim()
-            .parse()
-            .map_err(|e| OaieError::Other(format!("invalid agent PID: {e}")))?;
+        let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| OaieError::Other(format!("read agent PID (is --sandbox-agent active?): {e}")))?;
+        let pid: u32 = pid_str.trim().parse().map_err(|e| OaieError::Other(format!("invalid agent PID: {e}")))?;
 
         // Verify the process is still alive.
         let proc_dir = format!("/proc/{pid}");
         if !std::path::Path::new(&proc_dir).exists() {
-            return Err(OaieError::Other(format!(
-                "agent process {pid} is no longer running"
-            )));
+            return Err(OaieError::Other(format!("agent process {pid} is no longer running")));
         }
 
         // Enter the agent's namespaces via nsenter.
-        output::info(&format!(
-            "Attaching to session {} (agent pid {pid})...",
-            self.session_id,
-        ));
+        output::info(&format!("Attaching to session {} (agent pid {pid})...", self.session_id,));
 
         let status = std::process::Command::new("nsenter")
-            .args([
-                "-m", "-u", "-i", "-p", "-n",
-                "-t", &pid.to_string(),
-                "/bin/sh",
-            ])
+            .args(["-m", "-u", "-i", "-p", "-n", "-t", &pid.to_string(), "/bin/sh"])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())

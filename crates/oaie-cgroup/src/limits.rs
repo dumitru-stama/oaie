@@ -27,6 +27,15 @@ impl LimitsApplied {
     pub fn any_enforced(&self) -> bool {
         self.memory || self.pids || self.cpu
     }
+
+    /// True if every limit that was REQUESTED was successfully written.
+    /// `swap` is not checked: the swap controller may legitimately be
+    /// unavailable and it is not a primary security limit.
+    pub fn all_requested_applied(&self, limits: &CgroupLimits) -> bool {
+        (limits.memory_max.is_none() || self.memory)
+            && (limits.pids_max.is_none() || self.pids)
+            && (limits.cpu_quota_us.is_none() || self.cpu)
+    }
 }
 
 /// Apply cgroup v2 limits by writing to control files in `cgroup_path`.

@@ -26,10 +26,7 @@ use oaie_core::config::OaieStore;
 use oaie_core::error::{OaieError, Result};
 use oaie_core::hash_algo::{HashAlgorithm, StreamingHasher};
 use oaie_core::job::{JobSpec, TraceMode};
-use oaie_core::session::{
-    AgentSandboxMode, BudgetExtensionRequest, DispatchRequest, DispatchResponse, OutputEntry,
-    SessionBudget, SessionConfig, SessionEvent, SessionEventKind, SessionId, SessionState,
-};
+use oaie_core::session::{AgentSandboxMode, BudgetExtensionRequest, DispatchRequest, DispatchResponse, OutputEntry, SessionBudget, SessionConfig, SessionEvent, SessionEventKind, SessionId, SessionState};
 use oaie_db::{OaieDb, SessionCallRecord, SessionRecord};
 
 use crate::policy_resolve::ResolvedPolicy;
@@ -113,8 +110,7 @@ impl SessionEventWriter {
 
         // Hash this event to produce the chain link.
         // SessionEvent is always serializable — panic would indicate a logic bug.
-        let event_json = serde_json::to_string(&event)
-            .expect("SessionEvent must be JSON-serializable");
+        let event_json = serde_json::to_string(&event).expect("SessionEvent must be JSON-serializable");
         self.prev_hash = Self::hash_bytes(self.hash_algo, event_json.as_bytes());
         self.seq += 1;
 
@@ -127,8 +123,7 @@ impl SessionEventWriter {
         let mut buf = Vec::new();
         for event in &self.events {
             // Events were already validated as serializable in emit().
-            let line = serde_json::to_string(event)
-                .expect("SessionEvent must be JSON-serializable");
+            let line = serde_json::to_string(event).expect("SessionEvent must be JSON-serializable");
             buf.extend_from_slice(line.as_bytes());
             buf.push(b'\n');
         }
@@ -175,9 +170,7 @@ impl AgentProcess {
     /// Non-blocking check: has the agent exited?
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
         match self {
-            Self::Host(child) => {
-                child.try_wait().map(|opt| opt.map(|s| s.code().unwrap_or(-1)))
-            }
+            Self::Host(child) => child.try_wait().map(|opt| opt.map(|s| s.code().unwrap_or(-1))),
             Self::Sandboxed { pid, reaped } => {
                 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
                 match waitpid(*pid, Some(WaitPidFlag::WNOHANG)) {
@@ -258,19 +251,27 @@ pub struct SessionRunner {
     /// Heartbeat interval (0 = disabled). Agent must dispatch at least one
     /// activity within this interval or the session is terminated.
     heartbeat_interval: Duration,
-    /// Tool filter for allowlist/denylist (Phase N.2).
+    /// Tool filter for allowlist/denylist.
     tool_filter: Option<oaie_core::session::ToolFilter>,
-    /// Tools denied network access (Phase N.3).
+    /// The per-tool basename(argv[0]) check this fed cannot constrain a
+    /// per-sandbox capability — `["sh", "-c", "curl ..."]` bypasses any
+    /// argv[0] gate. Field stays for session.toml deserialize compat; the
+    /// dispatch loop logs once-per-session and ignores it. Network is
+    /// per-session: policy.network.
     deny_network_tools: Vec<String>,
-    /// Approval policy (Phase O.3).
+    /// One-shot flag for the deprecation warning above. AtomicBool because
+    /// dispatch_loop is the hot path and the swap-true pattern is the
+    /// idiomatic Rust "log once" without a Mutex.
+    deny_network_warned: std::sync::atomic::AtomicBool,
+    /// Approval policy.
     approval: oaie_core::session::ApprovalPolicy,
-    /// Maximum agent stdout+stderr output in bytes (0 = unlimited, Phase N.4).
+    /// Maximum agent stdout+stderr output in bytes (0 = unlimited).
     max_agent_output_bytes: u64,
-    /// Whether the agent runs inside a sandbox (Phase O.1).
+    /// Whether the agent runs inside a sandbox.
     agent_sandbox_mode: AgentSandboxMode,
-    /// Maximum concurrent tool calls (Phase Q.1.2).
+    /// Maximum concurrent tool calls.
     max_concurrent_tools: u32,
-    /// Counter for currently executing tool calls (Phase Q.1.2).
+    /// Counter for currently executing tool calls.
     active_tools: AtomicU32,
 }
 
@@ -297,12 +298,7 @@ pub struct SessionResult {
 
 impl SessionRunner {
     /// Create a new session, allocating directories and DB record.
-    pub fn create(
-        store: OaieStore,
-        policy: ResolvedPolicy,
-        config: SessionConfig,
-        command: &[String],
-    ) -> Result<Self> {
+    pub fn create(store: OaieStore, policy: ResolvedPolicy, config: SessionConfig, command: &[String]) -> Result<Self> {
         let session_id = oaie_core::session::new_session_id();
         let cas = CasStore::new(store.cas_dir.clone(), store.hash_algorithm);
         let db = OaieDb::open(&store.db_path)?;
@@ -313,10 +309,8 @@ impl SessionRunner {
         fs::create_dir_all(&artifacts_dir)?;
 
         // Insert session record in DB.
-        let command_json = serde_json::to_string(command)
-            .map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
-        let budget_json = serde_json::to_string(&config.budget)
-            .map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
+        let command_json = serde_json::to_string(command).map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
+        let budget_json = serde_json::to_string(&config.budget).map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
 
         let network_mode_str = match &policy.network {
             oaie_core::policy::NetworkMode::Off => "off",
@@ -343,11 +337,7 @@ impl SessionRunner {
 
         let event_writer = SessionEventWriter::new(store.hash_algorithm);
 
-        let heartbeat_interval = if config.heartbeat_interval_s > 0 {
-            Duration::from_secs(config.heartbeat_interval_s)
-        } else {
-            Duration::ZERO
-        };
+        let heartbeat_interval = if config.heartbeat_interval_s > 0 { Duration::from_secs(config.heartbeat_interval_s) } else { Duration::ZERO };
 
         Ok(Self {
             store,
@@ -367,6 +357,7 @@ impl SessionRunner {
             heartbeat_interval,
             tool_filter: config.tool_filter,
             deny_network_tools: config.deny_network_tools,
+            deny_network_warned: std::sync::atomic::AtomicBool::new(false),
             approval: config.approval,
             max_agent_output_bytes: config.max_agent_output_bytes,
             agent_sandbox_mode: config.agent_sandbox,
@@ -386,9 +377,7 @@ impl SessionRunner {
         let start = Instant::now();
 
         // Emit SessionStart event.
-        self.event_writer.emit(SessionEventKind::SessionStart {
-            command: command.to_vec(),
-        });
+        self.event_writer.emit(SessionEventKind::SessionStart { command: command.to_vec() });
 
         // Set up the dispatch socket and artifacts directory.
         let sock_path = self.session_dir.join("dispatch.sock");
@@ -396,24 +385,18 @@ impl SessionRunner {
         // Remove any stale socket file.
         let _ = fs::remove_file(&sock_path);
 
-        let listener = UnixListener::bind(&sock_path).map_err(|e| {
-            OaieError::SandboxError(format!("bind dispatch socket: {e}"))
-        })?;
+        let listener = UnixListener::bind(&sock_path).map_err(|e| OaieError::SandboxError(format!("bind dispatch socket: {e}")))?;
         // Restrict socket access to the current user only.
-        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            OaieError::SandboxError(format!("set socket permissions: {e}"))
-        })?;
+        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).map_err(|e| OaieError::SandboxError(format!("set socket permissions: {e}")))?;
         // Non-blocking accept so we can check the agent process status.
-        listener.set_nonblocking(true).map_err(|e| {
-            OaieError::SandboxError(format!("set socket non-blocking: {e}"))
-        })?;
+        listener.set_nonblocking(true).map_err(|e| OaieError::SandboxError(format!("set socket non-blocking: {e}")))?;
 
-        // Determine whether we need to count agent output (N.4).
+        // Determine whether we need to count agent output.
         let counting_output = self.max_agent_output_bytes > 0 && !quiet;
 
         // Spawn the agent process.
         // Host mode: bare process with env vars pointing to host paths.
-        // Sandboxed mode (O.1): namespace sandbox with dispatch socket and
+        // Sandboxed mode: namespace sandbox with dispatch socket and
         // artifacts dir bind-mounted at /oaie/ inside the sandbox.
         let sandboxed = self.agent_sandbox_mode == AgentSandboxMode::Sandboxed;
 
@@ -421,10 +404,7 @@ impl SessionRunner {
         let (sock_env, artifacts_env) = if sandboxed {
             ("/oaie/dispatch.sock".to_string(), "/oaie/artifacts".to_string())
         } else {
-            (
-                sock_path.to_string_lossy().into_owned(),
-                self.artifacts_dir.to_string_lossy().into_owned(),
-            )
+            (sock_path.to_string_lossy().into_owned(), self.artifacts_dir.to_string_lossy().into_owned())
         };
 
         let agent_output_bytes = std::sync::Arc::new(AtomicU64::new(0));
@@ -432,7 +412,7 @@ impl SessionRunner {
         let mut tee_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
 
         let mut agent = if sandboxed {
-            // O.1: Spawn agent inside a namespace sandbox.
+            // Spawn agent inside a namespace sandbox.
             use oaie_sandbox::sandbox::{SandboxConfig, SessionMount};
 
             // Build sandbox config with session mounts for dispatch socket and artifacts.
@@ -444,11 +424,13 @@ impl SessionRunner {
                         source: sock_path.clone(),
                         target: "/oaie/dispatch.sock".into(),
                         writable: true,
+                        exec: false,
                     },
                     SessionMount {
                         source: self.artifacts_dir.clone(),
                         target: "/oaie/artifacts".into(),
                         writable: true,
+                        exec: false,
                     },
                 ],
                 network: self.policy.network.clone(),
@@ -457,12 +439,20 @@ impl SessionRunner {
                 ..SandboxConfig::default()
             };
 
-            let env_vars = vec![
-                ("OAIE_DISPATCH_SOCK".into(), sock_env.clone()),
-                ("OAIE_SESSION_ID".into(), self.session_id.to_string()),
-                ("OAIE_ARTIFACTS_DIR".into(), artifacts_env.clone()),
-            ];
+            let env_vars = vec![("OAIE_DISPATCH_SOCK".into(), sock_env.clone()), ("OAIE_SESSION_ID".into(), self.session_id.to_string()), ("OAIE_ARTIFACTS_DIR".into(), artifacts_env.clone())];
 
+            // CONSTRAINT for the tee threads spawned below: their hot
+            // loops MUST NOT call malloc. Reason: dispatch_loop() (called
+            // after these threads start) issues a raw clone(2) per tool
+            // call via runner.execute() → backend_namespace::spawn_sandboxed.
+            // Raw clone(2) does NOT fire pthread_atfork handlers, so if a
+            // tee thread is mid-malloc when clone() snapshots the address
+            // space, the child inherits a held arena lock and deadlocks at
+            // its first allocation (mounts::setup_mounts). The tee loops
+            // therefore use raw_write_all (libc::write, async-signal-safe)
+            // instead of std::io::stdout()'s LineWriter (whose internal
+            // buffer can realloc). See `spawn_sandboxed` in sandbox.rs for
+            // the matching comment on the child side.
             let mut sandboxed_child = oaie_sandbox::sandbox::spawn_sandboxed(
                 &sandbox_config,
                 command,
@@ -479,7 +469,11 @@ impl SessionRunner {
             let stderr_pipe = sandboxed_child.take_stderr();
             sandboxed_child.mark_reaped(); // We manage lifecycle via AgentProcess.
 
-            // Set up tee threads for sandboxed stdout/stderr.
+            // Set up tee threads for sandboxed stdout/stderr. Sandboxed
+            // mode is at least as hostile as Host mode (the agent is
+            // jailed because it's less trusted), so the same byte-rate
+            // cap the Host-mode tee threads use applies here too.
+            let rate_limit = self.budget.max_agent_output_rate;
             if !quiet {
                 if let Some(stdout) = stdout_pipe {
                     let counter = agent_output_bytes.clone();
@@ -487,22 +481,34 @@ impl SessionRunner {
                     let kill = agent_kill_flag.clone();
                     tee_handles.push(std::thread::spawn(move || {
                         let mut reader = std::io::BufReader::new(stdout);
-                        let mut real_stdout = std::io::stdout().lock();
                         let mut buf = [0u8; 8192];
+                        let mut window_bytes: u64 = 0;
+                        let mut window_start = Instant::now();
                         loop {
                             let n = match Read::read(&mut reader, &mut buf) {
                                 Ok(0) | Err(_) => break,
                                 Ok(n) => n,
                             };
+                            // raw_write_all: see the alloc-free constraint
+                            // comment at the spawn_sandboxed call above.
+                            raw_write_all(libc::STDOUT_FILENO, &buf[..n]);
                             if counting_output {
                                 let total = counter.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                                let _ = std::io::Write::write_all(&mut real_stdout, &buf[..n]);
                                 if total > limit {
                                     kill.store(true, Ordering::Relaxed);
                                     break;
                                 }
-                            } else {
-                                let _ = std::io::Write::write_all(&mut real_stdout, &buf[..n]);
+                            }
+                            if rate_limit > 0 {
+                                if window_start.elapsed() >= Duration::from_secs(1) {
+                                    window_bytes = 0;
+                                    window_start = Instant::now();
+                                }
+                                window_bytes += n as u64;
+                                if window_bytes > rate_limit {
+                                    kill.store(true, Ordering::Relaxed);
+                                    break;
+                                }
                             }
                         }
                     }));
@@ -513,22 +519,32 @@ impl SessionRunner {
                     let kill = agent_kill_flag.clone();
                     tee_handles.push(std::thread::spawn(move || {
                         let mut reader = std::io::BufReader::new(stderr);
-                        let mut real_stderr = std::io::stderr().lock();
                         let mut buf = [0u8; 8192];
+                        let mut window_bytes: u64 = 0;
+                        let mut window_start = Instant::now();
                         loop {
                             let n = match Read::read(&mut reader, &mut buf) {
                                 Ok(0) | Err(_) => break,
                                 Ok(n) => n,
                             };
+                            raw_write_all(libc::STDERR_FILENO, &buf[..n]);
                             if counting_output {
                                 let total = counter.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                                let _ = std::io::Write::write_all(&mut real_stderr, &buf[..n]);
                                 if total > limit {
                                     kill.store(true, Ordering::Relaxed);
                                     break;
                                 }
-                            } else {
-                                let _ = std::io::Write::write_all(&mut real_stderr, &buf[..n]);
+                            }
+                            if rate_limit > 0 {
+                                if window_start.elapsed() >= Duration::from_secs(1) {
+                                    window_bytes = 0;
+                                    window_start = Instant::now();
+                                }
+                                window_bytes += n as u64;
+                                if window_bytes > rate_limit {
+                                    kill.store(true, Ordering::Relaxed);
+                                    break;
+                                }
                             }
                         }
                     }));
@@ -561,7 +577,7 @@ impl SessionRunner {
                 .spawn()
                 .map_err(|e| OaieError::SandboxError(format!("spawn agent: {e}")))?;
 
-            // Agent output counting tee threads (N.4 + Q.1.3 rate limiting).
+            // Agent output counting tee threads with byte-rate limiting.
             if counting_output {
                 let rate_limit = self.budget.max_agent_output_rate;
                 if let Some(stdout) = child.stdout.take() {
@@ -570,7 +586,6 @@ impl SessionRunner {
                     let kill = agent_kill_flag.clone();
                     tee_handles.push(std::thread::spawn(move || {
                         let mut reader = std::io::BufReader::new(stdout);
-                        let mut real_stdout = std::io::stdout().lock();
                         let mut buf = [0u8; 8192];
                         let mut window_bytes: u64 = 0;
                         let mut window_start = Instant::now();
@@ -580,12 +595,12 @@ impl SessionRunner {
                                 Ok(n) => n,
                             };
                             let total = counter.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                            let _ = std::io::Write::write_all(&mut real_stdout, &buf[..n]);
+                            raw_write_all(libc::STDOUT_FILENO, &buf[..n]);
                             if total > limit {
                                 kill.store(true, Ordering::Relaxed);
                                 break;
                             }
-                            // Rate limit check (Q.1.3).
+                            // Rate limit check.
                             if rate_limit > 0 {
                                 if window_start.elapsed() >= Duration::from_secs(1) {
                                     window_bytes = 0;
@@ -606,7 +621,6 @@ impl SessionRunner {
                     let kill = agent_kill_flag.clone();
                     tee_handles.push(std::thread::spawn(move || {
                         let mut reader = std::io::BufReader::new(stderr);
-                        let mut real_stderr = std::io::stderr().lock();
                         let mut buf = [0u8; 8192];
                         let mut window_bytes: u64 = 0;
                         let mut window_start = Instant::now();
@@ -616,12 +630,12 @@ impl SessionRunner {
                                 Ok(n) => n,
                             };
                             let total = counter.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-                            let _ = std::io::Write::write_all(&mut real_stderr, &buf[..n]);
+                            raw_write_all(libc::STDERR_FILENO, &buf[..n]);
                             if total > limit {
                                 kill.store(true, Ordering::Relaxed);
                                 break;
                             }
-                            // Rate limit check (Q.1.3).
+                            // Rate limit check.
                             if rate_limit > 0 {
                                 if window_start.elapsed() >= Duration::from_secs(1) {
                                     window_bytes = 0;
@@ -647,13 +661,7 @@ impl SessionRunner {
 
         // Enter the dispatch loop.
         let expected_agent_pid = agent.id();
-        let loop_result = self.dispatch_loop(
-            &listener,
-            &mut agent,
-            start,
-            &agent_kill_flag,
-            Some(expected_agent_pid),
-        );
+        let loop_result = self.dispatch_loop(&listener, &mut agent, start, &agent_kill_flag, Some(expected_agent_pid));
 
         // Kill the agent if still running.
         agent.kill_and_wait();
@@ -670,9 +678,7 @@ impl SessionRunner {
         // Handle dispatch loop errors.
         if let Err(ref e) = loop_result {
             self.state = SessionState::Stopped;
-            self.event_writer.emit(SessionEventKind::SessionStop {
-                status: format!("error: {e}"),
-            });
+            self.event_writer.emit(SessionEventKind::SessionStop { status: format!("error: {e}") });
         }
 
         let wall_time_s = start.elapsed().as_secs();
@@ -696,31 +702,19 @@ impl SessionRunner {
     }
 
     /// The main dispatch loop: accept connections, process tool calls.
-    fn dispatch_loop(
-        &mut self,
-        listener: &UnixListener,
-        agent: &mut AgentProcess,
-        start: Instant,
-        agent_kill_flag: &AtomicBool,
-        agent_pid: Option<u32>,
-    ) -> Result<()> {
-        let wall_timeout = Duration::from_secs(self.budget.max_wall_time_s);
+    fn dispatch_loop(&mut self, listener: &UnixListener, agent: &mut AgentProcess, start: Instant, agent_kill_flag: &AtomicBool, agent_pid: Option<u32>) -> Result<()> {
         let mut last_activity = Instant::now();
         let mut last_snapshot = Instant::now();
         let snapshot_interval = Duration::from_secs(30);
 
         loop {
-            // Check agent output budget first (N.4): the tee thread may have
+            // Check agent output budget first: the tee thread may have
             // killed the pipe causing SIGPIPE on the child, so check this
             // before child exit to get the correct terminal state.
             if agent_kill_flag.load(Ordering::Relaxed) {
                 self.state = SessionState::BudgetExhausted;
-                self.event_writer.emit(SessionEventKind::BudgetExhausted {
-                    budget_name: "agent_output".into(),
-                });
-                self.event_writer.emit(SessionEventKind::SessionStop {
-                    status: "budget_exhausted".into(),
-                });
+                self.event_writer.emit(SessionEventKind::BudgetExhausted { budget_name: "agent_output".into() });
+                self.event_writer.emit(SessionEventKind::SessionStop { status: "budget_exhausted".into() });
                 return Ok(());
             }
 
@@ -728,41 +722,32 @@ impl SessionRunner {
             match agent.try_wait() {
                 Ok(Some(_status)) => {
                     self.state = SessionState::Stopped;
-                    self.event_writer.emit(SessionEventKind::SessionStop {
-                        status: "stopped".into(),
-                    });
+                    self.event_writer.emit(SessionEventKind::SessionStop { status: "stopped".into() });
                     return Ok(());
                 }
                 Ok(None) => {} // Still running.
                 Err(e) => {
-                    return Err(OaieError::SandboxError(format!(
-                        "check agent status: {e}"
-                    )));
+                    return Err(OaieError::SandboxError(format!("check agent status: {e}")));
                 }
             }
 
-            // Check wall time.
-            if start.elapsed() >= wall_timeout {
+            // Check wall time. Read self.budget live so check_budget_extension
+            // (which mutates max_wall_time_s) actually takes effect.
+            if start.elapsed().as_secs() >= self.budget.max_wall_time_s {
                 self.state = SessionState::TimedOut;
-                self.event_writer.emit(SessionEventKind::SessionStop {
-                    status: "timed_out".into(),
-                });
+                self.event_writer.emit(SessionEventKind::SessionStop { status: "timed_out".into() });
                 return Ok(());
             }
 
             // Check heartbeat (M.4): if enabled and no activity within interval.
-            if !self.heartbeat_interval.is_zero()
-                && last_activity.elapsed() >= self.heartbeat_interval
-            {
+            if !self.heartbeat_interval.is_zero() && last_activity.elapsed() >= self.heartbeat_interval {
                 let elapsed_s = last_activity.elapsed().as_secs();
                 self.event_writer.emit(SessionEventKind::HeartbeatTimeout {
                     elapsed_s,
                     interval_s: self.heartbeat_interval.as_secs(),
                 });
                 self.state = SessionState::Stopped;
-                self.event_writer.emit(SessionEventKind::SessionStop {
-                    status: "heartbeat_timeout".into(),
-                });
+                self.event_writer.emit(SessionEventKind::SessionStop { status: "heartbeat_timeout".into() });
                 return Ok(());
             }
 
@@ -778,16 +763,18 @@ impl SessionRunner {
             // Try to accept a connection.
             match listener.accept() {
                 Ok((stream, _addr)) => {
-                    // SO_PEERCRED: verify connecting process matches the spawned agent (Q.1.1).
+                    // SO_PEERCRED: verify connecting process matches the spawned agent.
                     if let Some(expected_pid) = agent_pid {
                         match get_peer_pid(&stream) {
                             Some(peer_pid) if peer_pid != expected_pid => {
-                                oaie_core::log_warn!(
-                                    "rejecting connection from PID {peer_pid} (expected {expected_pid})"
-                                );
+                                oaie_core::log_warn!("rejecting connection from PID {peer_pid} (expected {expected_pid})");
                                 continue;
                             }
-                            _ => {} // Matched or couldn't determine — allow.
+                            Some(_) => {} // Matched — allow.
+                            None => {
+                                oaie_core::log_warn!("rejecting connection: cannot determine peer PID (cred.pid <= 0)");
+                                continue;
+                            }
                         }
                     }
                     // Activity detected — reset heartbeat timer.
@@ -800,9 +787,7 @@ impl SessionRunner {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => {
-                    return Err(OaieError::SandboxError(format!(
-                        "accept dispatch connection: {e}"
-                    )));
+                    return Err(OaieError::SandboxError(format!("accept dispatch connection: {e}")));
                 }
             }
         }
@@ -879,12 +864,9 @@ impl SessionRunner {
 
         // If session was budget_exhausted and we got more headroom, resume.
         if self.state == SessionState::BudgetExhausted {
-            let calls_ok = self.budget_used.tool_calls.load(Ordering::Relaxed)
-                < self.budget.max_tool_calls;
-            let time_ok = self.budget_used.tool_time_ms.load(Ordering::Relaxed) / 1000
-                < self.budget.max_tool_time_s;
-            let bytes_ok = self.budget_used.output_bytes.load(Ordering::Relaxed)
-                < self.budget.max_output_bytes;
+            let calls_ok = self.budget_used.tool_calls.load(Ordering::Relaxed) < self.budget.max_tool_calls;
+            let time_ok = self.budget_used.tool_time_ms.load(Ordering::Relaxed) / 1000 < self.budget.max_tool_time_s;
+            let bytes_ok = self.budget_used.output_bytes.load(Ordering::Relaxed) < self.budget.max_output_bytes;
             if calls_ok && time_ok && bytes_ok {
                 self.state = SessionState::Running;
             }
@@ -892,9 +874,7 @@ impl SessionRunner {
 
         // Update DB budget JSON.
         if let Ok(budget_json) = serde_json::to_string(&self.budget) {
-            let _ = self
-                .db
-                .update_session_budget(&self.session_id.to_string(), &budget_json);
+            let _ = self.db.update_session_budget(&self.session_id.to_string(), &budget_json);
         }
     }
 
@@ -909,36 +889,27 @@ impl SessionRunner {
     }
 
     /// Handle a single connection from the agent: read requests, send responses.
-    fn handle_connection(
-        &mut self,
-        stream: std::os::unix::net::UnixStream,
-        start: Instant,
-    ) -> Result<()> {
+    fn handle_connection(&mut self, stream: std::os::unix::net::UnixStream, start: Instant) -> Result<()> {
         // Set stream to blocking for reads within this connection.
-        stream.set_nonblocking(false).map_err(|e| {
-            OaieError::SandboxError(format!("set stream blocking: {e}"))
-        })?;
+        stream.set_nonblocking(false).map_err(|e| OaieError::SandboxError(format!("set stream blocking: {e}")))?;
         // Timeout reads so we don't block forever if the agent hangs.
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|e| OaieError::SandboxError(format!("set read timeout: {e}")))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e| OaieError::SandboxError(format!("set read timeout: {e}")))?;
 
         let mut reader = BufReader::new(&stream);
         let mut writer = &stream;
 
         loop {
+            // Re-check session wall budget between requests so a single
+            // long-lived connection cannot bypass dispatch_loop's guards.
+            if start.elapsed().as_secs() >= self.budget.max_wall_time_s {
+                break;
+            }
             let mut line = String::new();
             // Bounded read: Take limits allocation to MAX_DISPATCH_LINE + 1 bytes,
             // preventing OOM from a malicious agent sending a multi-GB line.
-            let n = match BufRead::read_line(
-                &mut reader.by_ref().take(MAX_DISPATCH_LINE as u64 + 1),
-                &mut line,
-            ) {
+            let n = match BufRead::read_line(&mut reader.by_ref().take(MAX_DISPATCH_LINE as u64 + 1), &mut line) {
                 Ok(n) => n,
-                Err(ref e)
-                    if e.kind() == std::io::ErrorKind::WouldBlock
-                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                {
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
                     break; // Timeout on read — return to the dispatch loop.
                 }
                 Err(_) => break, // Connection closed or error.
@@ -993,19 +964,14 @@ impl SessionRunner {
     }
 
     /// Process a single tool dispatch request.
-    fn dispatch_tool_call(
-        &mut self,
-        request: &DispatchRequest,
-        _start: Instant,
-    ) -> DispatchResponse {
+    fn dispatch_tool_call(&mut self, request: &DispatchRequest, _start: Instant) -> DispatchResponse {
         let call_id = &request.id;
 
-        // Validate call_id: reject excessively long, null bytes, or newlines.
-        if call_id.len() > 256
-            || call_id.contains('\0')
-            || call_id.contains('\n')
-            || call_id.contains('\r')
-        {
+        // Validate call_id: reject excessively long, null bytes, newlines,
+        // or path-traversal components. call_id flows into PathBuf::join
+        // when constructing the per-call artifacts dir, and PathBuf::join
+        // with an absolute path replaces the base.
+        if call_id.len() > 256 || call_id.contains('\0') || call_id.contains('\n') || call_id.contains('\r') || !is_safe_artifact_label(call_id) {
             return DispatchResponse {
                 id: call_id.chars().take(64).collect(),
                 run_id: String::new(),
@@ -1025,6 +991,22 @@ impl SessionRunner {
                 outputs: vec![],
                 duration_ms: 0,
                 error: Some("empty command in dispatch request".into()),
+            };
+        }
+
+        // Budget check: tool calls. Runs BEFORE input staging so a
+        // budget-exhausted agent cannot drive unbounded host-side fs::copy.
+        let current_calls = self.budget_used.tool_calls.load(Ordering::Relaxed);
+        if current_calls >= self.budget.max_tool_calls {
+            self.state = SessionState::BudgetExhausted;
+            self.event_writer.emit(SessionEventKind::BudgetExhausted { budget_name: "tool_calls".into() });
+            return DispatchResponse {
+                id: call_id.clone(),
+                run_id: String::new(),
+                exit_code: -1,
+                outputs: vec![],
+                duration_ms: 0,
+                error: Some(format!("budget exhausted: max_tool_calls ({}) reached", self.budget.max_tool_calls)),
             };
         }
 
@@ -1053,18 +1035,43 @@ impl SessionRunner {
                         error: Some(format!("unsafe input label: {label:?}")),
                     };
                 }
-                // Validate source path exists.
-                let source = std::path::Path::new(source_path);
-                if !source.exists() {
-                    return DispatchResponse {
-                        id: call_id.clone(),
-                        run_id: String::new(),
-                        exit_code: -1,
-                        outputs: vec![],
-                        duration_ms: 0,
-                        error: Some(format!("input source not found: {source_path:?}")),
-                    };
-                }
+                // Translate agent-namespace path → host path. The agent's
+                // /oaie/artifacts/ maps to <session_dir>/artifacts/ on the
+                // host. Reject anything outside that prefix — the supervisor
+                // must NEVER open an agent-supplied path verbatim (it would
+                // read with host-namespace + supervisor-UID visibility).
+                let rel = match std::path::Path::new(source_path).strip_prefix("/oaie/artifacts") {
+                    Ok(r) if is_safe_artifact_label(&r.to_string_lossy()) => r,
+                    _ => {
+                        return DispatchResponse {
+                            id: call_id.clone(),
+                            run_id: String::new(),
+                            exit_code: -1,
+                            outputs: vec![],
+                            duration_ms: 0,
+                            error: Some(format!("input source must be under /oaie/artifacts/: {source_path:?}")),
+                        };
+                    }
+                };
+                let source = self.session_dir.join("artifacts").join(rel);
+                // The agent has RW access to artifacts_dir via the /oaie/artifacts
+                // bind mount and can plant symlinks there. Resolve all symlinks
+                // and require the result stays under artifacts_dir, so the
+                // supervisor never reads a host file outside the shared dir.
+                let artifacts_canon = fs::canonicalize(&self.artifacts_dir).unwrap_or_else(|_| self.artifacts_dir.clone());
+                let source = match fs::canonicalize(&source) {
+                    Ok(p) if p.starts_with(&artifacts_canon) => p,
+                    _ => {
+                        return DispatchResponse {
+                            id: call_id.clone(),
+                            run_id: String::new(),
+                            exit_code: -1,
+                            outputs: vec![],
+                            duration_ms: 0,
+                            error: Some(format!("input source not found or escapes artifacts dir: {source_path:?}")),
+                        };
+                    }
+                };
                 let dest = input_dir.join(label);
                 // Defense-in-depth: resolved path must stay under input_dir.
                 if !dest.starts_with(&input_dir) {
@@ -1093,7 +1100,18 @@ impl SessionRunner {
             }
             Some(input_dir)
         } else {
-            None
+            // No inputs declared. Still pass an EMPTY inputs/<call_id>/ dir
+            // rather than None: backend_namespace.rs falls back to the
+            // SUPERVISOR's cwd when JobSpec.inputs is None (a convenience
+            // default for the human CLI), and the supervisor's cwd is
+            // wherever `oaie session ...` was launched from — typically
+            // the operator's project directory. An agent that omits inputs
+            // would otherwise get that bind-mounted RO at /in.
+            let input_dir = self.session_dir.join("inputs").join(call_id);
+            if let Err(e) = fs::create_dir_all(&input_dir) {
+                oaie_core::log_warn!("create empty inputs dir: {e}");
+            }
+            Some(input_dir)
         };
 
         // Tool filter check (N.2): deny takes precedence over allow.
@@ -1136,43 +1154,18 @@ impl SessionRunner {
             }
         }
 
-        // Budget check: tool calls.
-        let current_calls = self.budget_used.tool_calls.load(Ordering::Relaxed);
-        if current_calls >= self.budget.max_tool_calls {
-            self.state = SessionState::BudgetExhausted;
-            self.event_writer.emit(SessionEventKind::BudgetExhausted {
-                budget_name: "tool_calls".into(),
-            });
-            return DispatchResponse {
-                id: call_id.clone(),
-                run_id: String::new(),
-                exit_code: -1,
-                outputs: vec![],
-                duration_ms: 0,
-                error: Some(format!(
-                    "budget exhausted: max_tool_calls ({}) reached",
-                    self.budget.max_tool_calls
-                )),
-            };
-        }
-
         // Budget check: cumulative tool time.
         let used_time_ms = self.budget_used.tool_time_ms.load(Ordering::Relaxed);
         if used_time_ms / 1000 >= self.budget.max_tool_time_s {
             self.state = SessionState::BudgetExhausted;
-            self.event_writer.emit(SessionEventKind::BudgetExhausted {
-                budget_name: "tool_time".into(),
-            });
+            self.event_writer.emit(SessionEventKind::BudgetExhausted { budget_name: "tool_time".into() });
             return DispatchResponse {
                 id: call_id.clone(),
                 run_id: String::new(),
                 exit_code: -1,
                 outputs: vec![],
                 duration_ms: 0,
-                error: Some(format!(
-                    "budget exhausted: max_tool_time ({}s) reached",
-                    self.budget.max_tool_time_s
-                )),
+                error: Some(format!("budget exhausted: max_tool_time ({}s) reached", self.budget.max_tool_time_s)),
             };
         }
 
@@ -1180,19 +1173,14 @@ impl SessionRunner {
         let used_bytes = self.budget_used.output_bytes.load(Ordering::Relaxed);
         if used_bytes >= self.budget.max_output_bytes {
             self.state = SessionState::BudgetExhausted;
-            self.event_writer.emit(SessionEventKind::BudgetExhausted {
-                budget_name: "output_bytes".into(),
-            });
+            self.event_writer.emit(SessionEventKind::BudgetExhausted { budget_name: "output_bytes".into() });
             return DispatchResponse {
                 id: call_id.clone(),
                 run_id: String::new(),
                 exit_code: -1,
                 outputs: vec![],
                 duration_ms: 0,
-                error: Some(format!(
-                    "budget exhausted: max_output_bytes ({}) reached",
-                    self.budget.max_output_bytes
-                )),
+                error: Some(format!("budget exhausted: max_output_bytes ({}) reached", self.budget.max_output_bytes)),
             };
         }
 
@@ -1206,34 +1194,35 @@ impl SessionRunner {
         });
 
         // Cap per-call timeout by remaining session budget.
-        let remaining_tool_time_s = self
-            .budget
-            .max_tool_time_s
-            .saturating_sub(self.budget_used.tool_time_ms.load(Ordering::Relaxed) / 1000);
-        let remaining_wall_time_s = self
-            .budget
-            .max_wall_time_s
-            .saturating_sub(_start.elapsed().as_secs());
+        let remaining_tool_time_s = self.budget.max_tool_time_s.saturating_sub(self.budget_used.tool_time_ms.load(Ordering::Relaxed) / 1000);
+        let remaining_wall_time_s = self.budget.max_wall_time_s.saturating_sub(_start.elapsed().as_secs());
         let effective_timeout_s = match request.timeout_s {
             Some(t) => t.min(remaining_tool_time_s).min(remaining_wall_time_s),
             None => remaining_tool_time_s.min(remaining_wall_time_s),
         };
 
-        // Per-tool network deny (N.3): override network to Off for specific tools.
-        let tool_network = if self.policy.network.has_connectivity() {
-            let cmd_name = &request.command[0];
-            let basename = std::path::Path::new(cmd_name)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(cmd_name);
-            let denied = self
-                .deny_network_tools
-                .iter()
-                .any(|p| oaie_core::session::glob_match_public(p, basename));
-            !denied
-        } else {
-            false
-        };
+        // deny_network_tools is parsed for backwards-compat but ignored.
+        // Per-tool network deny on basename(argv[0]) can't work: the network
+        // capability is a property of the sandbox (CLONE_NEWNET or not), not
+        // of argv[0], and any argv that can fork+exec (sh -c, env, timeout,
+        // python -c, …) bypasses the basename match. The right granularity
+        // is the session-level `policy.network` field. The one-time warning
+        // below tells the operator the field isn't doing anything.
+        if !self.deny_network_tools.is_empty() && !self.deny_network_warned.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "[session_runner] deny_network_tools={:?} is set but IGNORED. \
+                 Per-tool network deny on basename(argv[0]) cannot work — \
+                 [\"sh\", \"-c\", \"curl ...\"] bypasses any argv[0] gate. \
+                 Network is per-session: set policy.network in the session \
+                 policy.",
+                self.deny_network_tools,
+            );
+        }
+        let tool_network = self.policy.network.has_connectivity();
+        // backend_namespace/backend_interactive read tool_policy.network
+        // (not JobSpec.network), and code below may mutate tool_policy
+        // independently of self.policy, so this clone is required.
+        let tool_policy = self.policy.clone();
 
         // Build a JobSpec for this tool call.
         let job = JobSpec {
@@ -1251,8 +1240,11 @@ impl SessionRunner {
             interactive: false,
         };
 
-        // Concurrent tool call semaphore (Q.1.2): reject if already at max.
-        let active = self.active_tools.load(Ordering::Relaxed);
+        // Concurrent tool call semaphore: acquire-then-check so the
+        // increment and compare are atomic w.r.t. concurrent dispatchers.
+        // RAII guard always decrements on drop, including on the reject path.
+        let active = self.active_tools.fetch_add(1, Ordering::Relaxed);
+        let _tool_guard = ActiveToolGuard(&self.active_tools);
         if active >= self.max_concurrent_tools {
             return DispatchResponse {
                 id: call_id.clone(),
@@ -1260,15 +1252,9 @@ impl SessionRunner {
                 exit_code: -1,
                 outputs: vec![],
                 duration_ms: 0,
-                error: Some(format!(
-                    "concurrent tool limit reached ({} active, max {})",
-                    active, self.max_concurrent_tools
-                )),
+                error: Some(format!("concurrent tool limit reached ({} active, max {})", active, self.max_concurrent_tools)),
             };
         }
-        // RAII guard: always decrements on drop, even on panic.
-        self.active_tools.fetch_add(1, Ordering::Relaxed);
-        let _tool_guard = ActiveToolGuard(&self.active_tools);
 
         // Execute via standard Runner pipeline.
         let runner = match Runner::new(self.store.clone()) {
@@ -1286,7 +1272,7 @@ impl SessionRunner {
         };
 
         let tool_start = Instant::now();
-        let run_result = runner.execute(&job, &self.policy, true, None);
+        let run_result = runner.execute(&job, &tool_policy, true, None);
         let tool_duration = tool_start.elapsed();
 
         let response = match run_result {
@@ -1296,12 +1282,15 @@ impl SessionRunner {
                 let duration_ms = tool_duration.as_millis().min(u64::MAX as u128) as u64;
 
                 // Update budget counters.
-                self.budget_used
-                    .tool_time_ms
-                    .fetch_add(duration_ms, Ordering::Relaxed);
+                self.budget_used.tool_time_ms.fetch_add(duration_ms, Ordering::Relaxed);
 
-                // Copy output artifacts to session artifacts directory.
-                let call_artifacts_dir = self.artifacts_dir.join(&run_id);
+                // Copy output artifacts to a supervisor-private staging dir
+                // first, then atomically rename into the agent-visible
+                // artifacts_dir. The agent has RW access to artifacts_dir via
+                // the /oaie/artifacts bind mount and could plant symlinks there
+                // between create_dir_all and fs::write; staging outside the
+                // bind mount prevents that race entirely.
+                let call_artifacts_dir = self.session_dir.join("staging").join(&run_id);
                 if let Err(e) = fs::create_dir_all(&call_artifacts_dir) {
                     oaie_core::log_warn!("create session artifacts dir: {e}");
                 }
@@ -1311,19 +1300,13 @@ impl SessionRunner {
                 for artifact in &result.output_artifacts {
                     // Validate artifact label to prevent path traversal.
                     if !is_safe_artifact_label(&artifact.label) {
-                        oaie_core::log_warn!(
-                            "skipping artifact with unsafe label: {:?}",
-                            artifact.label
-                        );
+                        oaie_core::log_warn!("skipping artifact with unsafe label: {:?}", artifact.label);
                         continue;
                     }
                     let artifact_path = call_artifacts_dir.join(&artifact.label);
                     // Defense-in-depth: resolved path must stay under artifacts dir.
                     if !artifact_path.starts_with(&call_artifacts_dir) {
-                        oaie_core::log_warn!(
-                            "artifact path escapes session directory: {:?}",
-                            artifact.label
-                        );
+                        oaie_core::log_warn!("artifact path escapes session directory: {:?}", artifact.label);
                         continue;
                     }
                     // Read the artifact from CAS and copy to session artifacts.
@@ -1336,10 +1319,7 @@ impl SessionRunner {
                             }
                         }
                         if let Err(e) = fs::write(&artifact_path, &data) {
-                            oaie_core::log_warn!(
-                                "write artifact {}: {e}",
-                                artifact_path.display()
-                            );
+                            oaie_core::log_warn!("write artifact {}: {e}", artifact_path.display());
                             continue;
                         }
                         total_output_size += artifact.size;
@@ -1351,7 +1331,7 @@ impl SessionRunner {
                     }
                 }
 
-                // Per-tool workspace merging (Q.1.4): copy outputs to shared workspace.
+                // Per-tool workspace merging: copy outputs to shared workspace.
                 let workspace = self.session_dir.join("workspace");
                 if let Err(e) = fs::create_dir_all(&workspace) {
                     oaie_core::log_warn!("create workspace dir: {e}");
@@ -1371,9 +1351,16 @@ impl SessionRunner {
                     }
                 }
 
-                self.budget_used
-                    .output_bytes
-                    .fetch_add(total_output_size, Ordering::Relaxed);
+                // Atomically publish staged artifacts into the agent-visible
+                // dir. rename(2) does not follow a symlink at the destination,
+                // so an agent-planted symlink at artifacts_dir/<run_id> causes
+                // the rename to fail (logged) rather than redirecting the write.
+                let publish_dir = self.artifacts_dir.join(&run_id);
+                if let Err(e) = fs::rename(&call_artifacts_dir, &publish_dir) {
+                    oaie_core::log_warn!("publish artifacts {} -> {}: {e}", call_artifacts_dir.display(), publish_dir.display());
+                }
+
+                self.budget_used.output_bytes.fetch_add(total_output_size, Ordering::Relaxed);
 
                 // Record session call in DB.
                 let command_json = serde_json::to_string(&request.command).unwrap_or_default();
@@ -1394,9 +1381,7 @@ impl SessionRunner {
                 // Read the manifest to get the trace chain_tip if tracing was active.
                 let trace_hash = {
                     let run_dir = self.store.runs_dir.join(result.run_id.full());
-                    oaie_cas::store::read_manifest(&run_dir)
-                        .ok()
-                        .and_then(|m| m.trace.map(|t| t.chain_tip))
+                    oaie_cas::store::read_manifest(&run_dir).ok().and_then(|m| m.trace.map(|t| t.chain_tip))
                 };
 
                 // Emit ToolResult event.
@@ -1444,13 +1429,7 @@ impl SessionRunner {
     /// Each warning fires at most once per session, tracked by AtomicBool flags.
     fn check_budget_warnings(&mut self, calls: u32, time_ms: u64, bytes: u64) {
         let warn_calls = (self.budget.max_tool_calls as f64 * 0.8) as u32;
-        if calls >= warn_calls
-            && calls > 0
-            && !self
-                .budget_used
-                .warned_tool_calls
-                .swap(true, Ordering::Relaxed)
-        {
+        if calls >= warn_calls && calls > 0 && !self.budget_used.warned_tool_calls.swap(true, Ordering::Relaxed) {
             self.event_writer.emit(SessionEventKind::BudgetWarning {
                 budget_name: "tool_calls".into(),
                 used: calls as u64,
@@ -1459,12 +1438,7 @@ impl SessionRunner {
         }
 
         let warn_time_ms = (self.budget.max_tool_time_s as f64 * 0.8 * 1000.0) as u64;
-        if time_ms >= warn_time_ms
-            && !self
-                .budget_used
-                .warned_tool_time
-                .swap(true, Ordering::Relaxed)
-        {
+        if time_ms >= warn_time_ms && !self.budget_used.warned_tool_time.swap(true, Ordering::Relaxed) {
             self.event_writer.emit(SessionEventKind::BudgetWarning {
                 budget_name: "tool_time".into(),
                 used: time_ms / 1000,
@@ -1473,12 +1447,7 @@ impl SessionRunner {
         }
 
         let warn_bytes = (self.budget.max_output_bytes as f64 * 0.8) as u64;
-        if bytes >= warn_bytes
-            && !self
-                .budget_used
-                .warned_output_bytes
-                .swap(true, Ordering::Relaxed)
-        {
+        if bytes >= warn_bytes && !self.budget_used.warned_output_bytes.swap(true, Ordering::Relaxed) {
             self.event_writer.emit(SessionEventKind::BudgetWarning {
                 budget_name: "output_bytes".into(),
                 used: bytes,
@@ -1505,10 +1474,7 @@ impl SessionRunner {
         };
 
         // Build TOML array for argv with proper escaping.
-        let argv_toml: Vec<String> = command
-            .iter()
-            .map(|s| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
-            .collect();
+        let argv_toml: Vec<String> = command.iter().map(|s| format!("\"{}\"", toml_escape(s))).collect();
         let argv_toml_str = format!("[{}]", argv_toml.join(", "));
 
         // Build calls section from DB.
@@ -1518,15 +1484,10 @@ impl SessionRunner {
             .map(|c| {
                 let cmd: Vec<String> = serde_json::from_str(&c.command).unwrap_or_default();
                 // Escape strings for safe TOML embedding.
-                let call_id_esc = c.call_id.replace('\\', "\\\\").replace('"', "\\\"");
-                let run_id_esc = c.run_id.replace('\\', "\\\\").replace('"', "\\\"");
+                let call_id_esc = toml_escape(&c.call_id);
+                let run_id_esc = toml_escape(&c.run_id);
                 // Build TOML array for command.
-                let cmd_array: Vec<String> = cmd
-                    .iter()
-                    .map(|s| {
-                        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-                    })
-                    .collect();
+                let cmd_array: Vec<String> = cmd.iter().map(|s| format!("\"{}\"", toml_escape(s))).collect();
                 format!(
                     "[[session.calls]]\nseq = {}\ncall_id = \"{}\"\nrun_id = \"{}\"\ncommand = [{}]\nexit_code = {}\nduration_ms = {}\n",
                     c.seq,
@@ -1541,21 +1502,9 @@ impl SessionRunner {
 
         let stopped_at = Utc::now().to_rfc3339();
 
-        // Escape strings for safe TOML embedding (handles quotes and backslashes).
-        let name_escaped = self
-            .policy
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
-        let policy_escaped = self
-            .policy
-            .name
-            .as_deref()
-            .unwrap_or("custom")
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"");
+        // Escape strings for safe TOML embedding.
+        let name_escaped = toml_escape(self.policy.name.as_deref().unwrap_or(""));
+        let policy_escaped = toml_escape(self.policy.name.as_deref().unwrap_or("custom"));
 
         // Build optional [session.agent] section for containment metadata.
         let agent_section = {
@@ -1563,16 +1512,10 @@ impl SessionRunner {
             if self.containment.is_some() || self.llm_provider.is_some() {
                 lines.push("[session.agent]".to_string());
                 if let Some(ref c) = self.containment {
-                    lines.push(format!(
-                        "containment = \"{}\"",
-                        c.replace('\\', "\\\\").replace('"', "\\\"")
-                    ));
+                    lines.push(format!("containment = \"{}\"", toml_escape(c)));
                 }
                 if let Some(ref p) = self.llm_provider {
-                    lines.push(format!(
-                        "llm_provider = \"{}\"",
-                        p.replace('\\', "\\\\").replace('"', "\\\"")
-                    ));
+                    lines.push(format!("llm_provider = \"{}\"", toml_escape(p)));
                 }
                 lines.push(String::new()); // blank line separator
             }
@@ -1650,12 +1593,7 @@ impl SessionRunner {
         let manifest_hash_hex = manifest_hash.to_hex();
 
         // Update DB.
-        self.db.complete_session(
-            &self.session_id.to_string(),
-            self.state.as_str(),
-            Some(&manifest_hash_hex),
-            None,
-        )?;
+        self.db.complete_session(&self.session_id.to_string(), self.state.as_str(), Some(&manifest_hash_hex), None)?;
 
         Ok(manifest_hash_hex)
     }
@@ -1666,16 +1604,40 @@ impl SessionRunner {
     }
 }
 
+/// Write all bytes to a raw fd via libc::write — async-signal-safe, no malloc.
+///
+/// The tee threads use this instead of `std::io::stdout()`/`stderr()` because
+/// std's Stdout wraps a `LineWriter<StdoutRaw>` whose internal buffer can
+/// realloc. The tee threads stay alive across every per-tool-call clone(2)
+/// in dispatch_loop, and raw clone(2) doesn't fire pthread_atfork — so a
+/// realloc-mid-clone snapshots a held malloc arena lock into the child,
+/// which then deadlocks at its first allocation. write(2) is on the POSIX
+/// async-signal-safe list; this loop never touches the allocator.
+///
+/// EINTR is retried. Other errors (EPIPE on closed terminal, EBADF) just
+/// return — there's nowhere useful to report a tee-write failure to.
+fn raw_write_all(fd: libc::c_int, mut buf: &[u8]) {
+    while !buf.is_empty() {
+        let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if n < 0 {
+            // SAFETY: errno is thread-local; reading it is fine.
+            if unsafe { *libc::__errno_location() } == libc::EINTR {
+                continue;
+            }
+            return; // EPIPE / EBADF / etc. — give up silently.
+        }
+        if n == 0 {
+            return; // Shouldn't happen on a regular fd, but don't spin.
+        }
+        buf = &buf[n as usize..];
+    }
+}
+
 /// Write a JSON response followed by a newline to the socket.
 fn write_response(writer: &mut impl Write, response: &DispatchResponse) -> Result<()> {
-    let json = serde_json::to_string(response)
-        .map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
-    writer
-        .write_all(json.as_bytes())
-        .map_err(OaieError::Io)?;
-    writer
-        .write_all(b"\n")
-        .map_err(OaieError::Io)?;
+    let json = serde_json::to_string(response).map_err(|e| OaieError::Io(std::io::Error::other(e)))?;
+    writer.write_all(json.as_bytes()).map_err(OaieError::Io)?;
+    writer.write_all(b"\n").map_err(OaieError::Io)?;
     writer.flush().map_err(OaieError::Io)?;
     Ok(())
 }
@@ -1689,35 +1651,20 @@ fn write_response(writer: &mut impl Write, response: &DispatchResponse) -> Resul
 /// The DB update uses a conditional check: we only mark the session as stopped
 /// if it's still in "running" state. If the dispatch loop has already finalized
 /// the session (with a manifest hash), this avoids overwriting that result.
-pub fn stop_session(
-    db: &OaieDb,
-    session_id: &str,
-    store_root: &std::path::Path,
-) -> Result<()> {
-    let session = db
-        .get_session(session_id)?
-        .ok_or_else(|| OaieError::Database(format!("session not found: {session_id}")))?;
+pub fn stop_session(db: &OaieDb, session_id: &str, store_root: &std::path::Path) -> Result<()> {
+    let session = db.get_session(session_id)?.ok_or_else(|| OaieError::Database(format!("session not found: {session_id}")))?;
 
     if session.status != "running" && session.status != "starting" {
-        return Err(OaieError::Other(format!(
-            "session {} is not running (status: {})",
-            session_id, session.status
-        )));
+        return Err(OaieError::Other(format!("session {} is not running (status: {})", session_id, session.status)));
     }
 
     // Try to signal the agent process via the PID file.
-    let pid_path = store_root
-        .join("sessions")
-        .join(session_id)
-        .join("agent.pid");
+    let pid_path = store_root.join("sessions").join(session_id).join("agent.pid");
     if let Ok(pid_str) = fs::read_to_string(&pid_path) {
         if let Ok(pid) = pid_str.trim().parse::<i32>() {
             if pid > 0 {
                 // SIGTERM for graceful shutdown. Ignore error (process may have exited).
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(pid),
-                    nix::sys::signal::Signal::SIGTERM,
-                );
+                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
             }
         }
     }
@@ -1734,6 +1681,41 @@ pub fn stop_session(
     }
 
     Ok(())
+}
+
+/// Escape a string for embedding in a TOML basic string (`"..."`).
+///
+/// The inline `.replace('\\', "\\\\").replace('"', "\\\"")` chain this
+/// replaces handled ONLY backslash and double-quote. TOML basic strings
+/// also terminate at a raw newline — and the spec requires escaping all
+/// of U+0000-U+0008, U+000A-U+001F, U+007F. An agent-controlled argv
+/// element containing `\n` would break out of `command = ["..."]` and
+/// inject `[[session.calls]]` sections into the signed manifest.
+/// Fixing at the escape function covers every call site
+/// regardless of whether upstream validation (call_id's
+/// is_safe_artifact_label, etc.) already constrains the input.
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            // Remaining control chars (incl. U+007F) → \uXXXX. TOML accepts
+            // \uXXXX for any BMP scalar; non-control chars pass through
+            // unescaped (UTF-8 in TOML basic strings is fine).
+            c if c.is_control() => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Validate an artifact label is safe for use as a filename.
@@ -1753,7 +1735,7 @@ fn is_safe_artifact_label(label: &str) -> bool {
     true
 }
 
-/// Get the PID of the peer process connected to a Unix domain socket (Q.1.1).
+/// Get the PID of the peer process connected to a Unix domain socket.
 ///
 /// Uses `SO_PEERCRED` to retrieve the peer's credentials. Returns `None` if
 /// the call fails (e.g., not a Unix socket).
@@ -1761,15 +1743,7 @@ fn get_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
     let fd = stream.as_raw_fd();
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let ret = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            &mut cred as *mut _ as *mut libc::c_void,
-            &mut len,
-        )
-    };
+    let ret = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, &mut cred as *mut _ as *mut libc::c_void, &mut len) };
     if ret == 0 && cred.pid > 0 {
         Some(cred.pid as u32)
     } else {
@@ -1782,7 +1756,9 @@ fn get_peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<u32> {
 /// Writes a prompt to stderr, reads y/N from stdin. Returns true if approved.
 fn prompt_approval(call_id: &str, command: &[String]) -> bool {
     use std::io::BufRead;
-    let cmd_display = command.join(" ");
+    // escape_debug renders control chars (\r, \x1b, etc.) visibly so a
+    // malicious agent can't spoof the prompt with terminal escape sequences.
+    let cmd_display: String = command.iter().map(|s| s.escape_debug().to_string()).collect::<Vec<_>>().join(" ");
     eprint!("OAIE: Approve tool call {call_id}? [{cmd_display}] (y/N): ");
     let stdin = std::io::stdin();
     let mut line = String::new();
@@ -1790,4 +1766,32 @@ fn prompt_approval(call_id: &str, command: &[String]) -> bool {
         return false;
     }
     matches!(line.trim(), "y" | "Y" | "yes" | "YES")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::toml_escape;
+
+    /// A raw `\n` in an agent-supplied value, embedded
+    /// in a TOML basic string with only `\` and `"` escaped, terminates the
+    /// string and lets the rest become TOML structure. This test embeds a
+    /// hostile value via `toml_escape()`, parses the result, and asserts
+    /// the value round-trips intact AND no extra table was injected.
+    #[test]
+    fn toml_escape_contains_newlines_and_controls() {
+        let hostile = "a\"\n[[session.calls]]\nseq = 999\r\n\t\u{1b}[31m\u{7f}end";
+        let doc = format!("k = \"{}\"\n", toml_escape(hostile));
+        let parsed: toml::Value = toml::from_str(&doc).unwrap_or_else(|e| panic!("toml_escape produced unparseable TOML: {e}\n{doc}"));
+        // Round-trip: the parsed value must equal the original (escapes
+        // were correct, not lossy).
+        assert_eq!(parsed.get("k").and_then(|v| v.as_str()), Some(hostile), "value did not round-trip");
+        // No injected structure: only one top-level key.
+        assert_eq!(parsed.as_table().map(|t| t.len()), Some(1), "hostile value escaped its string context: {parsed:?}");
+    }
+
+    #[test]
+    fn toml_escape_passthrough_plain() {
+        // Non-control, non-quote, non-backslash → unchanged (UTF-8 OK).
+        assert_eq!(toml_escape("hello/world-ünïcødé"), "hello/world-ünïcødé");
+    }
 }

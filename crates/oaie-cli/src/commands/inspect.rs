@@ -138,7 +138,7 @@ impl InspectCmd {
             }
         }
 
-        // CAS store statistics (Q.1.8).
+        // CAS store statistics.
         show_store_stats(&store);
 
         Ok(())
