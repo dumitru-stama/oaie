@@ -12,8 +12,11 @@ with configurable isolation, resource limits, and observation.
 | `--spec` | | `PathBuf` | | TOML/JSON job spec file (`-` for stdin) |
 | `--in` | | `PathBuf` | cwd | Input directory (read-only inside sandbox) |
 | `--out` | `-o` | `PathBuf` | `./oaie-out/<run_id>` | Output directory |
-| `--ro` | | `Vec<String>` | | Additional read-only bind mounts |
-| `--rw` | | `Vec<String>` | | Additional read-write bind mounts |
+| `--ro` | | `Vec<String>` | | Additional read-only mounts (mapped to `/mnt/ro{i}`) |
+| `--rw` | | `Vec<String>` | | Additional read-write mounts (mapped to `/mnt/rw{i}`) |
+| `--bind-ro` | | `Vec<PathBuf>` | | Identity bind: host path read-only at the SAME path inside (NOEXEC) |
+| `--bind-rw` | | `Vec<PathBuf>` | | Identity bind: host path read-write at the SAME path inside (NOEXEC) |
+| `--bind-exec` | | `Vec<PathBuf>` | | Identity bind: host path read-only AND executable at the SAME path inside |
 | `--net` | | `String` | `off` | Network mode: `on`, `off`, `allow:host:port`, `preset:name` |
 | `--trace` | | `String` | `off` | Trace backend: `off`, `ptrace`, `ebpf` |
 | `--notrace` | | `bool` | | Disable tracing (overrides `--trace`) |
@@ -30,6 +33,12 @@ with configurable isolation, resource limits, and observation.
 | `--output` | | `OutputFormat` | `human` | Output format: `human`, `json` |
 
 Environment set inside sandbox: `OAIE_RUN_ID`, `OAIE_OUT=/out`.
+
+`--bind-*` paths are validated: hosts under `/proc`, `/sys`, `/dev`, `/boot`,
+`/root`, `/etc`, `/var/run` are rejected (with carve-outs for `/etc/ssl`,
+`/etc/ca-certificates`, `/etc/alternatives`, `/etc/java*`, `/etc/ld.so*`,
+`/etc/localtime`, `/etc/timezone`). `--bind-rw` and `--bind-exec` are mutually
+exclusive — exec+rw would let a tool write a payload and run it.
 
 ### `oaie inspect` — Inspect a completed run
 
@@ -310,7 +319,7 @@ listmount. When `allow_memfd=false`: adds memfd_create, execveat.
 
 | Resource | Soft | Hard | Configurable |
 |----------|------|------|-------------|
-| NOFILE | 1024 | 4096 | No |
+| NOFILE | 1024 | 4096 | Yes (`max_files`; hard = 4× soft) |
 | MEMLOCK | 64M | 64M | No |
 | CORE | 0 | 0 | No |
 | NPROC | 64 | 128 | Yes (`max_pids`) |
@@ -401,6 +410,7 @@ OPENSSL_CONF, OPENSSL_ENGINES.
 | `max_time` | 5m | Wall-clock timeout |
 | `max_pids` | 64 | RLIMIT_NPROC + cgroup pids.max |
 | `max_fsize` | 1G | RLIMIT_FSIZE |
+| `max_files` | 1024 | RLIMIT_NOFILE soft; hard = 4× soft |
 | `allow_memfd` | false | Allow memfd_create/execveat (for JIT) |
 | `capabilities` | [] | Retained caps (net_raw, net_bind_service) |
 | `cpu_quota` | None | cgroup cpu.max ("50%", "200%") |
@@ -416,21 +426,21 @@ OPENSSL_CONF, OPENSSL_ENGINES.
 
 ### 13 Named Presets
 
-| Name | Network | Memory | Time | PIDs | memfd |
-|------|---------|--------|------|------|-------|
-| `safe` | Off | 512M | 5m | 64 | No |
-| `net` | On | 512M | 5m | 64 | No |
-| `agent-safe` | Off | 256M | 2m | 64 | No |
-| `agent-net` | On | 512M | 5m | 64 | No |
-| `agent-build` | On | 2G | 10m | 256 | Yes |
-| `agent-analyze` | Off | 1G | 15m | 128 | Yes |
-| `anthropic` | Allowlist | 512M | 5m | 64 | No |
-| `openai` | Allowlist | 512M | 5m | 64 | No |
-| `llm` | Allowlist | 512M | 5m | 64 | No |
-| `contained-local` | Off | 1G | 10m | 128 | Yes |
-| `contained-cloud` | Off | 512M | 5m | 64 | No |
-| `contained-strict` | Off | 128M | 1m | 32 | No |
-| `contained-interactive` | Off | 1G | 10m | 128 | Yes |
+| Name | Network | Memory | Time | PIDs | NOFILE | memfd |
+|------|---------|--------|------|------|--------|-------|
+| `safe` | Off | 512M | 5m | 64 | 1024 | No |
+| `net` | On | 512M | 5m | 64 | 1024 | No |
+| `agent-safe` | Off | 1G | 2m | 512 | 1024 | No |
+| `agent-net` | On | 512M | 5m | 256 | 1024 | No |
+| `agent-build` | On | 2G | 10m | 256 | 4096 | Yes |
+| `agent-analyze` | Off | 12G | 45m | 128 | 4096 | Yes |
+| `anthropic` | Allowlist | 512M | 5m | 64 | 1024 | No |
+| `openai` | Allowlist | 512M | 5m | 64 | 1024 | No |
+| `llm` | Allowlist | 512M | 5m | 64 | 1024 | No |
+| `contained-local` | Off | 1G | 10m | 128 | 1024 | Yes |
+| `contained-cloud` | Off | 512M | 5m | 64 | 1024 | No |
+| `contained-strict` | Off | 128M | 1m | 32 | 256 | No |
+| `contained-interactive` | Off | 1G | 10m | 128 | 1024 | Yes |
 
 ---
 
@@ -606,16 +616,20 @@ environment variables.
 
 ## MCP Server (Model Context Protocol)
 
-6 tools exposed via JSON-RPC 2.0 over stdin/stdout:
+5 tools exposed via JSON-RPC 2.0 over stdin/stdout:
 
 | Tool | Description |
 |------|-------------|
 | `oaie_run` | Execute command in sandbox |
-| `oaie_verify` | Verify run integrity |
-| `oaie_read_output` | Read artifact (text or base64 binary) |
+| `oaie_verify` | Verify run integrity (run_id must originate from this MCP connection) |
+| `oaie_read_output` | Read artifact (run_id must originate from this MCP connection) |
 | `oaie_session_run` | Start agent session |
-| `oaie_session_status` | Query session state |
-| `oaie_session_stop` | Stop running session |
+| `oaie_session_status` | Query session state (read-only) |
+
+`oaie_session_stop` is intentionally not exposed via MCP: no MCP tool creates a
+session, so the MCP caller has no session it could legitimately stop. Calls
+return `METHOD_NOT_FOUND`. Operators stop sessions with `oaie session stop` on
+the host.
 
 ---
 
@@ -699,4 +713,4 @@ Session equivalent: `StructuredSessionResult` with tool call results.
 - `make release` — release build
 - Serial test categories: adversarial, sandbox, parity, trace, verify, signing,
   interactive, session, stress, v03_integration, backward_compat, runner_e2e
-- 668 tests total
+- 600+ tests across the workspace

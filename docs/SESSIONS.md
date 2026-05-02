@@ -254,10 +254,14 @@ The OAIE MCP server exposes session tools via JSON-RPC 2.0:
 |---|---|
 | `oaie_session_run` | Start a new session (returns session ID) |
 | `oaie_session_status` | Query session state and usage |
-| `oaie_session_stop` | Stop a running session |
 
 These complement the existing `oaie_run`, `oaie_verify`, and `oaie_read_output`
 tools, allowing AI agents to manage sessions through the MCP protocol.
+
+`oaie_session_stop` is **not** exposed via MCP. No MCP tool creates a session,
+so the MCP caller has no session it could legitimately stop; the handler returns
+`METHOD_NOT_FOUND` so spec-compliant clients see the tool as nonexistent.
+Operators stop sessions with `oaie session stop` on the host.
 
 ## SessionClient Library
 

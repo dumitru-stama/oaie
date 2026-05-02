@@ -59,6 +59,35 @@ Trade-offs:
 - ~15ms startup overhead (negligible for most tools)
 - Requires Linux 5.13+ with user namespaces enabled
 
+#### Bind-mount flags (`--bind-ro`, `--bind-rw`, `--bind-exec`)
+
+In addition to `--ro` / `--rw` (which map to `/mnt/ro{i}` / `/mnt/rw{i}`), the
+namespace backend supports identity bind mounts that expose a host path at the
+SAME path inside the sandbox. Use this when the command literally references
+host paths — pre-built JSON envelopes containing absolute paths, or
+`sh -c 'executor < /host/scratch/input.json'`-style invocations.
+
+| Flag | Mode | NOEXEC |
+|---|---|---|
+| `--bind-ro` | read-only | yes |
+| `--bind-rw` | read-write | yes |
+| `--bind-exec` | read-only | no (executable) |
+
+`--bind-exec` is the narrow case for an executor binary that lives outside
+`/usr`; read-only is forced because exec+rw would let a tool write a payload
+and run it. Validation rejects host paths under `/proc`, `/sys`, `/dev`,
+`/boot`, `/root`, `/etc`, `/var/run` (with carve-outs for `/etc/ssl`,
+`/etc/ca-certificates`, `/etc/alternatives`, `/etc/java*`, `/etc/ld.so*`,
+`/etc/localtime`, `/etc/timezone`).
+
+#### Interactive mode (`-i`) restrictions
+
+Interactive PTY mode is supported only on the namespace backend. It rejects
+`--backend=bare`, `--backend=firecracker`, `--no-isolation`, `--quiet`,
+`--output=json`, and `--trace=ebpf`. With `--cgroup=require`, interactive
+mode fails closed if the cgroup scope cannot be created via `systemd-run`
+or `oaie-priv` — it does not fall back to rlimits-only.
+
 ### Firecracker (`--backend=firecracker`)
 
 Use when:

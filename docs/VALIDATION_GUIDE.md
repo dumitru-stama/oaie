@@ -1436,7 +1436,12 @@ EXPECT: Run completes. Signature recorded.
 $ oaie verify last
 ```
 
-EXPECT: `ManifestSignature: Pass` (12th check).
+EXPECT (with the signing key's public_key in `[signing].trusted_public_keys`):
+`ManifestSignature: Pass`. Without a configured trust store, the check reports
+`Skip` (`NoTrustStore`) — the cryptography is valid but no trust anchor is
+configured. With a trust store that does NOT contain the signing key, the check
+reports `Fail` (`UntrustedKey`) — a self-attesting signature is exactly the
+attack the trust gate exists to catch.
 
 ### 18.5 Unsigned run — signature check skipped
 
@@ -1446,6 +1451,21 @@ $ oaie verify last
 ```
 
 EXPECT: `ManifestSignature: Skip` (no signature present).
+
+### Verification outcomes (reference)
+
+`verify_signature` returns one of four outcomes:
+
+| Outcome | Meaning | Verify status |
+|---------|---------|---------------|
+| `Trusted` | Crypto valid AND `sig.public_key` is in `SigningConfig.trusted_public_keys` | Pass |
+| `UntrustedKey` | Crypto valid but key is NOT in the trust list | Fail |
+| `BadSignature` | Manifest hash mismatch or Ed25519 verify failed | Fail |
+| `NoTrustStore` | `trusted_public_keys` is empty — crypto verifiable, trust unknown | Skip |
+
+The trust store is the only thing the verifier sees that did NOT come from the
+file under verification, so it is the actual trust anchor. Pre-v0.2.0 verify
+returned `bool` and conflated `NoTrustStore` with `Trusted`.
 
 ### 18.6 Export public key
 
@@ -2218,8 +2238,9 @@ EXPECT: JSON response with server info and capabilities.
 $ (echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'; echo '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}') | timeout 5 oaie-mcp 2>/dev/null
 ```
 
-EXPECT: JSON listing 6 tools: oaie_run, oaie_verify, oaie_read_output,
-oaie_session_run, oaie_session_status, oaie_session_stop.
+EXPECT: JSON listing 5 tools: oaie_run, oaie_verify, oaie_read_output,
+oaie_session_run, oaie_session_status. `oaie_session_stop` is intentionally
+not exposed via MCP — calls return METHOD_NOT_FOUND.
 
 ### 31.4 Execute run via MCP
 

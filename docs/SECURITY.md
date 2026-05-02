@@ -227,6 +227,34 @@ Verification check #12 (`ManifestSignature`) reads the sidecar, recomputes the
 manifest hash, and verifies the Ed25519 signature against the embedded public
 key. The check is skipped if no signature sidecar exists.
 
+### Trust Anchor (v0.2.0+)
+
+`sig.public_key` comes from the sidecar — it is attacker-controlled. Anyone can
+generate a keypair, sign a forged manifest, and embed their own public key plus
+any `signer_label` they choose. To prevent self-attesting signatures from
+passing verification, OAIE requires the signing key to be listed in
+`SigningConfig.trusted_public_keys` (the only input the verifier has that did
+NOT come from the file under verification).
+
+`verify_signature` returns one of four outcomes:
+
+| Outcome | Crypto valid? | Key trusted? | Verify status |
+|---|---|---|---|
+| `Trusted` | yes | yes (in trust list) | Pass |
+| `UntrustedKey` | yes | no — key not in list | Fail |
+| `BadSignature` | no — hash mismatch / Ed25519 fail | n/a | Fail |
+| `NoTrustStore` | yes | unknown — list is empty | Skip |
+
+The trust check is performed **after** the cryptographic verify. An attacker who
+puts a known-trusted pubkey in `sig.public_key` but cannot produce a valid
+signature for it gets `BadSignature`, not `Trusted`.
+
+Pre-v0.2.0 the function returned `bool` and reported `Pass` whenever the
+cryptography was valid — including the case where no trust store was configured.
+That made self-attesting signatures pass verification by default. Operators
+relying on signed manifests for attestation must populate `trusted_public_keys`
+before relying on a `Pass` outcome.
+
 ## Budget as DoS Prevention
 
 Session budgets serve as a defense against denial-of-service attacks from

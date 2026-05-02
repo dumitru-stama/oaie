@@ -161,6 +161,33 @@ Rules are applied via `nsenter --net=/proc/<pid>/ns/net nft -f -` with the
 script piped to stdin. The `nsenter` approach avoids needing root access or
 capabilities on the host.
 
+### Privileged IPC: typed rules, not nft text (v0.2.0+)
+
+The unprivileged client never sends raw nft command text to `oaie-priv`. The
+`SetupNetns` request carries `allow_rules: Vec<NetAllowRule>` with closed-form
+fields:
+
+| Field | Type | Constraint |
+|---|---|---|
+| `addrs` | `Vec<IpAddr>` | parsed by serde from JSON; mutually exclusive with `cidr` |
+| `cidr` | `Option<String>` | fully parsed (`addr/prefix`), prefix ≤ 32 (v4) or ≤ 128 (v6) |
+| `port` | `u16` | nonzero |
+| `protocol` | `String` | exactly `"tcp"` or `"udp"` |
+
+`oaie-priv` validates every rule with `validate_allow_rule` and only then
+generates the nft batch on the privileged side. The variable components that
+get interpolated into nft commands are all closed-form values (`IpAddr`'s
+`Display` for addresses, `u16` for ports, the protocol literal) — there is no
+caller-supplied string that reaches the nft command line. This closes the
+historical injection surface where the client could ask `oaie-priv` to run an
+arbitrary nft script.
+
+Bounds: `MAX_ALLOW_RULES = 256` rules per request, `MAX_ADDRS_PER_RULE = 64`
+(one nft line emitted per address). The 64 KiB request size cap on the
+`oaie-priv` socket also bounds the JSON. Interface names and subnet strings
+in `CleanupNetns` go through `validate_iface_name` (1–15 chars, alnum/`-_.`)
+and `validate_subnet` (1–18 chars, digits/`./`).
+
 ## DNS Proxy
 
 The DNS proxy is a lightweight thread that:

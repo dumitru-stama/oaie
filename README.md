@@ -27,7 +27,7 @@ No daemons. No root. No Docker. Just `oaie run ./tool`.
 | **Attestation** | Content-addressed storage (BLAKE3/SHA-256), Ed25519 signed manifests |
 | **Defaults** | No network, 512 MB memory, 64 processes, 5 min timeout — zero config needed |
 | **Requirements** | Linux 5.10+, user namespaces, unprivileged user (no root) |
-| **Tests** | 668 tests across 16 crates |
+| **Tests** | 600+ tests across 16 crates |
 
 ---
 
@@ -158,20 +158,20 @@ break through simultaneously.
 
 ### Resource Limits
 
-| Resource | Default | Enforcement |
-|----------|---------|-------------|
-| Memory (virtual address space) | 512 MB | rlimit + cgroup |
-| Wall-clock timeout | 5 min (max 7 days) | Supervisor |
-| CPU time | 2x wall timeout (min 60s) | rlimit |
-| Processes/threads | 64 | rlimit + cgroup |
-| Max file size | 1 GB | rlimit |
-| Open file descriptors | 1024 / 4096 | rlimit |
-| Locked memory | 64 MB | rlimit |
-| Core dumps | Disabled | rlimit |
-| Stack size | 8 MB / 16 MB | rlimit |
-| Output files per run | 10,000 | Supervisor |
-| Single output file | 256 MB | Supervisor |
-| Total output | 1 GB | Supervisor |
+| Resource | Default | Configurable | Enforcement |
+|----------|---------|--------------|-------------|
+| Memory (virtual address space) | 512 MB | `max_memory` | rlimit + cgroup |
+| Wall-clock timeout | 5 min (max 7 days) | `max_time` | Supervisor |
+| CPU time | 2x wall timeout (min 60s) | derived | rlimit |
+| Processes/threads | 64 | `max_pids` | rlimit + cgroup |
+| Max file size | 1 GB | `max_fsize` | rlimit |
+| Open file descriptors | 1024 soft / 4096 hard | `max_files` (hard = 4× soft) | rlimit |
+| Locked memory | 64 MB | no | rlimit |
+| Core dumps | Disabled | no | rlimit |
+| Stack size | 8 MB / 16 MB | no | rlimit |
+| Output files per run | 10,000 | config.toml | Supervisor |
+| Single output file | 256 MB | config.toml | Supervisor |
+| Total output | 1 GB | config.toml | Supervisor |
 
 ### Filesystem Isolation
 
@@ -250,18 +250,18 @@ See [SESSIONS.md](docs/SESSIONS.md) and [CONTAINMENT.md](docs/CONTAINMENT.md) fo
 
 Built-in presets cover common use cases. Custom policies via TOML files.
 
-| Preset | Memory | Timeout | PIDs | Network | JIT | Use Case |
-|--------|--------|---------|------|---------|-----|----------|
-| `safe` (default) | 512 MB | 5 min | 64 | Off | No | General sandboxed execution |
-| `net` | 512 MB | 5 min | 64 | On | No | Commands needing network |
-| `agent-safe` | 256 MB | 2 min | 64 | Off | No | AI agent tool calls |
-| `agent-net` | 512 MB | 5 min | 64 | On | No | AI tools with network |
-| `agent-build` | 2 GB | 10 min | 256 | On | Yes | Build tasks (cargo, npm) |
-| `agent-analyze` | 1 GB | 15 min | 128 | Off | Yes | Analysis tasks |
-| `contained-local` | 1 GB | 10 min | 128 | Off | Yes | Local LLM agent sessions |
-| `contained-cloud` | 512 MB | 5 min | 64 | Off | No | Cloud LLM agent sessions |
-| `contained-strict` | 128 MB | 1 min | 32 | Off | No | Maximum restriction |
-| `contained-interactive` | 1 GB | 10 min | 128 | Off | Yes | Human-in-the-loop sessions |
+| Preset | Memory | Timeout | PIDs | NOFILE | Network | JIT | Use Case |
+|--------|--------|---------|------|--------|---------|-----|----------|
+| `safe` (default) | 512 MB | 5 min | 64 | 1024 | Off | No | General sandboxed execution |
+| `net` | 512 MB | 5 min | 64 | 1024 | On | No | Commands needing network |
+| `agent-safe` | 1 GB | 2 min | 512 | 1024 | Off | No | AI agent tool calls |
+| `agent-net` | 512 MB | 5 min | 256 | 1024 | On | No | AI tools with network |
+| `agent-build` | 2 GB | 10 min | 256 | 4096 | On | Yes | Build tasks (cargo, npm) |
+| `agent-analyze` | 12 GB | 45 min | 128 | 4096 | Off | Yes | JVM-style analysis |
+| `contained-local` | 1 GB | 10 min | 128 | 1024 | Off | Yes | Local LLM agent sessions |
+| `contained-cloud` | 512 MB | 5 min | 64 | 1024 | Off | No | Cloud LLM agent sessions |
+| `contained-strict` | 128 MB | 1 min | 32 | 256 | Off | No | Maximum restriction |
+| `contained-interactive` | 1 GB | 10 min | 128 | 1024 | Off | Yes | Human-in-the-loop sessions |
 
 "JIT" = allow `memfd_create`/`execveat` (needed by Java, Node.js, .NET runtimes).
 
@@ -357,7 +357,7 @@ oaie-priv         Privileged helper (cgroup management, BPF loading)
 oaie-firecracker  Firecracker microVM backend (feature-gated)
 oaie-guest        Guest agent for microVMs (static musl binary)
 oaie-bpf-common   Shared BPF/userspace types
-oaie-tests        Consolidated test suite (668 tests)
+oaie-tests        Consolidated test suite
 ```
 
 ## MCP Integration
@@ -369,7 +369,9 @@ OAIE includes an MCP server for AI agent frameworks:
 oaie-mcp
 
 # Tools: oaie_run, oaie_verify, oaie_read_output,
-#         oaie_session_run, oaie_session_status, oaie_session_stop
+#         oaie_session_run, oaie_session_status
+# (oaie_session_stop is intentionally not exposed via MCP — sessions
+#  are operator-CLI-managed; use `oaie session stop` on the host.)
 ```
 
 The `oaie-agent` crate provides a typed Rust client (`OaieClient`) for
@@ -394,7 +396,7 @@ programmatic access to all functionality.
 ## Build
 
 ```bash
-make                     # build + clippy + test (668 tests)
+make                     # build + clippy + test
 make build-firecracker   # build with Firecracker backend
 make build-mcp           # build MCP server
 make check-all           # all clippy + test variants

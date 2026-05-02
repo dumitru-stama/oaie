@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.2.0 (2026-05-02)
+
+### Security fixes
+
+- **Signature verification trust anchor**: `verify_signature` now returns `VerifyOutcome` (`Trusted` / `UntrustedKey` / `BadSignature` / `NoTrustStore`) instead of `bool`. The previous bool conflated "no trust store configured" with "trusted" — both returned `true`, letting self-attesting signatures pass verification. Pass status now requires the signing public key to be in `SigningConfig.trusted_public_keys`; an empty trust list yields `Skip`, and an unknown key yields `Fail`.
+- **Network policy IPC hardening**: `SetupNetns` no longer accepts a caller-supplied `nft_script: String`. The unprivileged client sends a typed `Vec<NetAllowRule>` (resolved IPs or canonical CIDR + port + protocol enum), and `oaie-priv` reconstructs the nft batch on the privileged side. New explicit validation in `oaie-priv/src/validate.rs`: protocol must be `tcp`/`udp`, port nonzero, exactly one of `addrs`/`cidr` set, CIDR fully parsed (not charset-only), `MAX_ALLOW_RULES = 256`, `MAX_ADDRS_PER_RULE = 64`, plus interface-name and subnet validators.
+- **MCP `oaie_session_stop` removed**: Sessions are operator-CLI-managed; the MCP caller has no session it could legitimately stop. The handler now returns `METHOD_NOT_FOUND` so spec-compliant clients see the tool as nonexistent. Operators continue to use `oaie session stop` on the host.
+- **Interactive bind-mount validation**: `oaie run -i` now rejects `--bind-ro/--bind-rw/--bind-exec` paths under `/proc`, `/sys`, `/dev`, `/boot`, `/root`, `/etc`, `/var/run` (with carve-outs for `/etc/ssl`, `/etc/ca-certificates`, `/etc/alternatives`, `/etc/java*`, `/etc/ld.so*`, `/etc/localtime`, `/etc/timezone`). Previously these flags were silently dropped.
+- **CgroupMode::Require enforced in interactive backend**: When the policy demands cgroup isolation, interactive mode now fails closed if neither `systemd-run` nor `oaie-priv` can create the scope. Previously `-i` could fall through to rlimits-only.
+
+### Features
+
+- **Identity-path bind mounts**: New `--bind-ro <PATH>`, `--bind-rw <PATH>`, `--bind-exec <PATH>` flags on `oaie run`. Mount a host path at the SAME path inside the sandbox (bwrap-style), distinct from `--ro`/`--rw` which map to `/mnt/ro{i}` / `/mnt/rw{i}`. Use when the command literally references host paths (pre-built JSON envelopes with absolute paths, `sh -c 'executor < /host/scratch/input.json'`). `--bind-ro` is NOEXEC; `--bind-exec` drops NOEXEC for the narrow case of an external executor binary; `--bind-rw` cannot be combined with exec.
+- **Policy-configurable `max_files`**: New `[limits].max_files` field (RLIMIT_NOFILE soft; hard = 4× soft). Default 1024. Preset values: `agent-build` and `agent-analyze` raise to 4096 (rustc/cargo, JVM-style classpaths), `contained-strict` lowers to 256.
+
+### Preset adjustments
+
+- `agent-safe`: `max_memory` 256M → 1G (RLIMIT_AS headroom for pthread/library mmaps). `max_pids` 64 → 512. The kuid-keyed RLIMIT_NPROC counter is shared across the operator's process tree, so the limit must clear the operator's working set plus a job's thread burst while staying a fork-bomb defense.
+- `agent-net`: `max_pids` 64 → 256.
+- `agent-analyze`: `max_memory` 1G → 12G, `max_time` 15m → 45m (sized for JVM-style analysis workloads).
+
+### Notes
+
+- Version number is `0.2.0` (down from the prior `0.3.x` working numbers in this changelog) — the `0.3.x` entries below describe an earlier development line that was not part of the released sequence.
+
 ## v0.3.9 (2026-03-04)
 
 ### Features — Phase Q: Gap Fixes & Documentation
